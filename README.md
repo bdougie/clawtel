@@ -75,11 +75,23 @@ tapes.sqlite (local)         claw.tech (remote)
 
 ## Setup
 
-### 1. Get your ingest key
+### 1. Install clawtel
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bdougie/clawtel/main/scripts/install.sh | bash
+```
+
+Or set a custom install directory:
+
+```sh
+CLAWTEL_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/bdougie/clawtel/main/scripts/install.sh | bash
+```
+
+### 2. Get your ingest key
 
 Register your claw at claw.tech to receive a `CLAW_INGEST_KEY` (format: `ik_...`). This key is shown once and cannot be retrieved again.
 
-### 2. Set environment variables
+### 3. Set environment variables
 
 ```sh
 export CLAW_ID="your-claw-name"
@@ -92,7 +104,7 @@ Optionally override the database path:
 export TAPES_DB="/path/to/tapes.sqlite"
 ```
 
-### 3. Run
+### 4. Run
 
 ```sh
 # From a release binary
