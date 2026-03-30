@@ -15,7 +15,7 @@ tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/
 
 - **Read side:** 4 columns from `nodes`: `created_at`, `model`, `prompt_tokens`, `completion_tokens`
 - **Send side:** aggregated heartbeat: `claw_id`, `window_start`, `window_end`, `model`, `input_tokens`, `output_tokens`, `message_count`
-- **Polling:** every 30 seconds, sends even when idle (uptime ping)
+- **Polling:** every 60 minutes, sends even when idle (presence ping)
 - **Cursor:** timestamp file next to the DB tracks last-seen row
 
 ## Security constraints
@@ -30,6 +30,28 @@ This is the most important section. clawtel runs on users' machines next to thei
 - **No key, no network** — if `CLAW_INGEST_KEY` is unset, exit immediately with no network calls
 
 If you're modifying what clawtel reads or sends, update the security model comment at the top of `main.go` to match.
+
+## Testing
+
+All changes must include tests. Run the suite with:
+
+```bash
+go test -v ./...
+```
+
+Coverage report:
+
+```bash
+go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
+```
+
+Requirements:
+- All new functions must have test coverage
+- Business logic functions (aggregate, readRows, assertSchema, cursor, etc.) must be at 100%
+- Use in-memory SQLite (`":memory:"`) for database tests — no fixtures on disk
+- Use `httptest.NewServer` for HTTP tests — never hit real endpoints
+- Functions that need a configurable URL should accept it as a parameter (see `sendToURL`, `pollWithURL`) so tests can inject `httptest` servers
+- `main()` is the orchestrator and uses `os.Exit`/`log.Fatal` — it is excluded from coverage targets
 
 ## Build
 
