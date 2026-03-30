@@ -70,7 +70,7 @@ tapes.sqlite (local)         claw.tech (remote)
 **Database path resolution:**
 
 1. `TAPES_DB` environment variable (explicit override)
-2. `.mb/tapes/tapes.sqlite` (openclaw-in-a-box layout)
+2. `.mb/tapes/tapes.sqlite` ([openclaw-in-a-box](https://github.com/papercomputeco/openclaw-in-a-box) layout)
 3. `~/.tapes/tapes.sqlite` (standalone tapes install)
 
 ## Setup
