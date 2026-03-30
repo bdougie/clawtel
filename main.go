@@ -149,6 +149,11 @@ func main() {
 // claw.tech can distinguish "online but idle" from "offline".
 // Returns the new cursor timestamp on success.
 func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time) (time.Time, error) {
+	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor)
+}
+
+// pollWithURL is the testable version of poll that accepts a custom endpoint URL.
+func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time) (time.Time, error) {
 	windowStart := cursor
 	windowEnd := time.Now().UTC()
 
@@ -159,7 +164,7 @@ func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time
 
 	hb := aggregate(clawID, windowStart, windowEnd, rows)
 
-	if err := send(client, ingestKey, hb); err != nil {
+	if err := sendToURL(client, url, ingestKey, hb); err != nil {
 		return cursor, fmt.Errorf("send: %v", err)
 	}
 
@@ -244,12 +249,17 @@ func aggregate(clawID string, start, end time.Time, rows []row) heartbeat {
 // The JSON payload matches the heartbeat struct exactly.
 // Inspect the struct above to verify what is sent.
 func send(client *http.Client, ingestKey string, hb heartbeat) error {
+	return sendToURL(client, ingestEndpoint, ingestKey, hb)
+}
+
+// sendToURL posts a heartbeat to the given URL. Extracted for testability.
+func sendToURL(client *http.Client, url, ingestKey string, hb heartbeat) error {
 	body, err := json.Marshal(hb)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, ingestEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
