@@ -20,7 +20,7 @@
 // the binary exits immediately. No key, no network calls, ever.
 //
 // Source: https://github.com/papercomputeco/clawtel
-// License: AGPL-3.0
+// License: MIT
 
 package main
 

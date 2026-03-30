@@ -161,4 +161,4 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o clawtel .
 
 ## License
 
-AGPL-3.0
+MIT
