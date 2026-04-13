@@ -848,9 +848,11 @@ func TestCompareSemver(t *testing.T) {
 }
 
 func TestCompareSemver_NonNumeric(t *testing.T) {
-	got := compareSemver("1.0.0-beta", "1.0.0-alpha")
-	if got == 0 {
-		t.Error("compareSemver should distinguish 1.0.0-beta from 1.0.0-alpha")
+	if got := compareSemver("1.0.0-beta", "1.0.0-alpha"); got <= 0 {
+		t.Errorf("compareSemver(beta, alpha) = %d, want > 0", got)
+	}
+	if got := compareSemver("1.0.0-alpha", "1.0.0-beta"); got >= 0 {
+		t.Errorf("compareSemver(alpha, beta) = %d, want < 0", got)
 	}
 }
 
