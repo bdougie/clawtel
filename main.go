@@ -62,6 +62,13 @@ type heartbeat struct {
 	InputTokens  int64     `json:"input_tokens"`
 	OutputTokens int64     `json:"output_tokens"`
 	MessageCount int64     `json:"message_count"`
+
+	// ClawhubSkills lists clawhub-installed skills discovered from
+	// CLAWTEL_CLAWHUB_LOCKS lock files. Optional. Omitted when unchanged
+	// since the last successful send so the server keeps last-known state.
+	// Each entry contains ONLY slug and version. No paths, timestamps, or
+	// content from the lock file are transmitted.
+	ClawhubSkills []skill `json:"clawhub_skills,omitempty"`
 }
 
 // row is what clawtel reads from tapes.sqlite.

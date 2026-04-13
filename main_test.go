@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -1079,5 +1080,67 @@ func TestParseLockPaths_SkipsEmptyEntries(t *testing.T) {
 	got := parseLockPaths("/a/lock.json,,/b/lock.json,")
 	if len(got) != 2 {
 		t.Errorf("got %v, want 2 entries", got)
+	}
+}
+
+// --- heartbeat clawhub_skills serialization ---
+
+func TestHeartbeat_OmitsClawhubSkillsWhenNil(t *testing.T) {
+	hb := heartbeat{
+		ClawID:       "test",
+		WindowStart:  time.Now().UTC(),
+		WindowEnd:    time.Now().UTC(),
+		Model:        "claude-opus-4-6",
+		InputTokens:  100,
+		OutputTokens: 50,
+		MessageCount: 1,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+	if _, present := m["clawhub_skills"]; present {
+		t.Error("clawhub_skills should be omitted when nil")
+	}
+}
+
+func TestHeartbeat_IncludesClawhubSkillsWhenSet(t *testing.T) {
+	hb := heartbeat{
+		ClawID:        "test",
+		ClawhubSkills: []skill{{Slug: "granola", Version: "1.0.0"}},
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+	skillsRaw, ok := m["clawhub_skills"]
+	if !ok {
+		t.Fatal("clawhub_skills missing from payload")
+	}
+	skillsList, ok := skillsRaw.([]interface{})
+	if !ok || len(skillsList) != 1 {
+		t.Fatalf("clawhub_skills shape unexpected: %v", skillsRaw)
+	}
+	first := skillsList[0].(map[string]interface{})
+	if first["slug"] != "granola" {
+		t.Errorf("slug = %v, want granola", first["slug"])
+	}
+	if first["version"] != "1.0.0" {
+		t.Errorf("version = %v, want 1.0.0", first["version"])
+	}
+	if len(first) != 2 {
+		t.Errorf("skill has %d fields, want exactly 2 (slug, version)", len(first))
+	}
+}
+
+func TestHeartbeat_OmitsClawhubSkillsWhenEmpty(t *testing.T) {
+	hb := heartbeat{ClawID: "test", ClawhubSkills: nil}
+	data, _ := json.Marshal(hb)
+	if bytes.Contains(data, []byte("clawhub_skills")) {
+		t.Errorf("nil ClawhubSkills should be omitted; got %s", data)
 	}
 }
