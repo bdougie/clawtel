@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -54,6 +55,44 @@ func insertRow(t *testing.T, db *sql.DB, createdAt time.Time, model string, prom
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// lockFixtures writes the canonical lock.json fixtures used across clawhub tests
+// to a fresh t.TempDir() and returns paths. `missing` points at a file that is
+// never created — useful for "skip missing file" assertions.
+func lockFixtures(t *testing.T) (valid, malformed, v2, missing string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	valid = filepath.Join(dir, "lock_valid.json")
+	if err := os.WriteFile(valid, []byte(`{
+  "version": 1,
+  "skills": {
+    "granola":         { "version": "1.0.0", "installedAt": 1775635621739 },
+    "openclaw-linear": { "version": "1.0.1", "installedAt": 1775635629099 }
+  }
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	malformed = filepath.Join(dir, "lock_malformed.json")
+	if err := os.WriteFile(malformed, []byte(`{ this is not valid json`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	v2 = filepath.Join(dir, "lock_v2.json")
+	if err := os.WriteFile(v2, []byte(`{
+  "version": 1,
+  "skills": {
+    "granola":   { "version": "1.2.0", "installedAt": 1775635621740 },
+    "tapes-cli": { "version": "0.3.0", "installedAt": 1775635629100 }
+  }
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	missing = filepath.Join(dir, "does_not_exist.json")
+	return
 }
 
 // --- aggregate tests ---
@@ -378,7 +417,7 @@ func TestPoll_Success(t *testing.T) {
 	defer server.Close()
 
 	cursor := now.Add(-time.Hour)
-	newCursor, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +436,7 @@ func TestPoll_SendError(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err == nil {
 		t.Fatal("expected error from send failure, got nil")
 	}
@@ -421,7 +460,7 @@ func TestPoll_EmptyDB(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +642,7 @@ func TestPoll_ReadError(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, pollErr := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	_, _, pollErr := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if pollErr == nil {
 		t.Fatal("expected error from readRows failure, got nil")
 	}
@@ -749,5 +788,517 @@ func TestHeartbeat_JSONFormat(t *testing.T) {
 	}
 	if m["message_count"].(float64) != 10 {
 		t.Errorf("message_count = %v", m["message_count"])
+	}
+}
+
+// --- parseLockFile tests ---
+
+func TestParseLockFile_Valid(t *testing.T) {
+	valid, _, _, _ := lockFixtures(t)
+	got, err := parseLockFile(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d skills, want 2", len(got))
+	}
+	if got["granola"] != "1.0.0" {
+		t.Errorf("granola = %q, want 1.0.0", got["granola"])
+	}
+	if got["openclaw-linear"] != "1.0.1" {
+		t.Errorf("openclaw-linear = %q, want 1.0.1", got["openclaw-linear"])
+	}
+}
+
+func TestParseLockFile_Malformed(t *testing.T) {
+	_, malformed, _, _ := lockFixtures(t)
+	_, err := parseLockFile(malformed)
+	if err == nil {
+		t.Fatal("expected parse error for malformed JSON, got nil")
+	}
+}
+
+func TestParseLockFile_Missing(t *testing.T) {
+	_, _, _, missing := lockFixtures(t)
+	_, err := parseLockFile(missing)
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+}
+
+func TestParseLockFile_WrongShape(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "lock.json")
+	os.WriteFile(tmp, []byte(`{"version": 2, "skills": {}}`), 0600)
+
+	_, err := parseLockFile(tmp)
+	if err == nil {
+		t.Fatal("expected error for unsupported lock version, got nil")
+	}
+}
+
+func TestParseLockFile_EmptySkills(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "lock.json")
+	os.WriteFile(tmp, []byte(`{"version": 1, "skills": {}}`), 0600)
+
+	got, err := parseLockFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+func TestParseLockFile_IgnoresInstalledAt(t *testing.T) {
+	valid, _, _, _ := lockFixtures(t)
+	got, err := parseLockFile(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for slug, v := range got {
+		if v == "" {
+			t.Errorf("skill %q has empty version", slug)
+		}
+	}
+}
+
+// --- compareSemver tests ---
+
+func TestCompareSemver(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.0.0", "1.0.0", 0},
+		{"1.0.0", "1.0.1", -1},
+		{"1.0.1", "1.0.0", 1},
+		{"1.2.0", "1.10.0", -1},
+		{"2.0.0", "1.99.99", 1},
+		{"1.0", "1.0.0", 0},
+		{"1", "1.0.0", 0},
+		{"1.0.0", "1.0", 0},
+		{"", "1.0.0", -1},
+		{"1.0.0", "", 1},
+		{"", "", 0},
+	}
+	for _, c := range cases {
+		got := compareSemver(c.a, c.b)
+		if got != c.want {
+			t.Errorf("compareSemver(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestCompareSemver_NonNumeric(t *testing.T) {
+	if got := compareSemver("1.0.0-beta", "1.0.0-alpha"); got <= 0 {
+		t.Errorf("compareSemver(beta, alpha) = %d, want > 0", got)
+	}
+	if got := compareSemver("1.0.0-alpha", "1.0.0-beta"); got >= 0 {
+		t.Errorf("compareSemver(alpha, beta) = %d, want < 0", got)
+	}
+}
+
+// --- dedupeSkills tests ---
+
+func TestDedupeSkills_SingleSource(t *testing.T) {
+	in := []map[string]string{
+		{"granola": "1.0.0", "openclaw-linear": "1.0.1"},
+	}
+	got := dedupeSkills(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d skills, want 2", len(got))
+	}
+	if got[0].Slug != "granola" {
+		t.Errorf("got[0].Slug = %q, want granola", got[0].Slug)
+	}
+	if got[1].Slug != "openclaw-linear" {
+		t.Errorf("got[1].Slug = %q, want openclaw-linear", got[1].Slug)
+	}
+}
+
+func TestDedupeSkills_KeepsHighestVersion(t *testing.T) {
+	in := []map[string]string{
+		{"granola": "1.0.0"},
+		{"granola": "1.2.0"},
+		{"granola": "1.1.0"},
+	}
+	got := dedupeSkills(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d skills, want 1", len(got))
+	}
+	if got[0].Version != "1.2.0" {
+		t.Errorf("Version = %q, want 1.2.0", got[0].Version)
+	}
+}
+
+func TestDedupeSkills_MergesDistinctSlugs(t *testing.T) {
+	in := []map[string]string{
+		{"granola": "1.0.0"},
+		{"tapes-cli": "0.3.0"},
+		{"openclaw-linear": "1.0.1"},
+	}
+	got := dedupeSkills(in)
+	if len(got) != 3 {
+		t.Fatalf("got %d skills, want 3", len(got))
+	}
+	expectedOrder := []string{"granola", "openclaw-linear", "tapes-cli"}
+	for i, want := range expectedOrder {
+		if got[i].Slug != want {
+			t.Errorf("got[%d].Slug = %q, want %q", i, got[i].Slug, want)
+		}
+	}
+}
+
+func TestDedupeSkills_Empty(t *testing.T) {
+	got := dedupeSkills(nil)
+	if got == nil {
+		t.Fatal("dedupeSkills(nil) returned nil, want empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+func TestDedupeSkills_EmptyMaps(t *testing.T) {
+	in := []map[string]string{{}, {}}
+	got := dedupeSkills(in)
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+// --- loadSkills tests ---
+
+func TestLoadSkills_NoPaths(t *testing.T) {
+	got := loadSkills(nil)
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+func TestLoadSkills_SingleValidFile(t *testing.T) {
+	valid, _, _, _ := lockFixtures(t)
+	got := loadSkills([]string{valid})
+	if len(got) != 2 {
+		t.Fatalf("got %d skills, want 2", len(got))
+	}
+	if got[0].Slug != "granola" || got[0].Version != "1.0.0" {
+		t.Errorf("got[0] = %+v, want {granola 1.0.0}", got[0])
+	}
+}
+
+func TestLoadSkills_MultipleFilesWithDedupe(t *testing.T) {
+	valid, _, v2, _ := lockFixtures(t)
+	got := loadSkills([]string{valid, v2})
+	if len(got) != 3 {
+		t.Fatalf("got %d skills, want 3", len(got))
+	}
+	slugToVersion := map[string]string{}
+	for _, s := range got {
+		slugToVersion[s.Slug] = s.Version
+	}
+	if slugToVersion["granola"] != "1.2.0" {
+		t.Errorf("granola = %q, want 1.2.0 (highest)", slugToVersion["granola"])
+	}
+	if slugToVersion["openclaw-linear"] != "1.0.1" {
+		t.Errorf("openclaw-linear = %q, want 1.0.1", slugToVersion["openclaw-linear"])
+	}
+	if slugToVersion["tapes-cli"] != "0.3.0" {
+		t.Errorf("tapes-cli = %q, want 0.3.0", slugToVersion["tapes-cli"])
+	}
+}
+
+func TestLoadSkills_SkipsMalformed(t *testing.T) {
+	valid, malformed, _, _ := lockFixtures(t)
+	got := loadSkills([]string{valid, malformed})
+	if len(got) != 2 {
+		t.Errorf("got %d skills, want 2 (malformed skipped)", len(got))
+	}
+}
+
+func TestLoadSkills_SkipsMissing(t *testing.T) {
+	valid, _, _, missing := lockFixtures(t)
+	got := loadSkills([]string{valid, missing})
+	if len(got) != 2 {
+		t.Errorf("got %d skills, want 2 (missing skipped)", len(got))
+	}
+}
+
+func TestLoadSkills_AllInvalid(t *testing.T) {
+	_, malformed, _, missing := lockFixtures(t)
+	got := loadSkills([]string{missing, malformed})
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0 (all invalid)", len(got))
+	}
+}
+
+// --- hashSkills tests ---
+
+func TestHashSkills_Stable(t *testing.T) {
+	a := []skill{{Slug: "granola", Version: "1.0.0"}, {Slug: "tapes", Version: "0.1.0"}}
+	b := []skill{{Slug: "granola", Version: "1.0.0"}, {Slug: "tapes", Version: "0.1.0"}}
+	if hashSkills(a) != hashSkills(b) {
+		t.Error("identical input should produce identical hash")
+	}
+}
+
+func TestHashSkills_Empty(t *testing.T) {
+	h1 := hashSkills(nil)
+	h2 := hashSkills([]skill{})
+	if h1 != h2 {
+		t.Errorf("nil and empty slice should hash equal; got %q vs %q", h1, h2)
+	}
+	if h1 == "" {
+		t.Error("hash should not be empty string")
+	}
+}
+
+func TestHashSkills_DiffersOnVersionChange(t *testing.T) {
+	a := []skill{{Slug: "granola", Version: "1.0.0"}}
+	b := []skill{{Slug: "granola", Version: "1.0.1"}}
+	if hashSkills(a) == hashSkills(b) {
+		t.Error("different versions should hash differently")
+	}
+}
+
+func TestHashSkills_DiffersOnSlugChange(t *testing.T) {
+	a := []skill{{Slug: "granola", Version: "1.0.0"}}
+	b := []skill{{Slug: "tapes", Version: "1.0.0"}}
+	if hashSkills(a) == hashSkills(b) {
+		t.Error("different slugs should hash differently")
+	}
+}
+
+func TestHashSkills_OrderInsensitive(t *testing.T) {
+	a := []skill{{Slug: "a", Version: "1"}, {Slug: "b", Version: "2"}}
+	b := []skill{{Slug: "b", Version: "2"}, {Slug: "a", Version: "1"}}
+	if hashSkills(a) != hashSkills(b) {
+		t.Error("hash should be order-insensitive")
+	}
+}
+
+// --- parseLockPaths tests ---
+
+func TestParseLockPaths_Empty(t *testing.T) {
+	got := parseLockPaths("")
+	if len(got) != 0 {
+		t.Errorf("got %d paths, want 0", len(got))
+	}
+}
+
+func TestParseLockPaths_Single(t *testing.T) {
+	got := parseLockPaths("/root/clawchief/.clawhub/lock.json")
+	if len(got) != 1 || got[0] != "/root/clawchief/.clawhub/lock.json" {
+		t.Errorf("got %v, want [/root/clawchief/.clawhub/lock.json]", got)
+	}
+}
+
+func TestParseLockPaths_Multiple(t *testing.T) {
+	got := parseLockPaths("/a/lock.json,/b/lock.json,/c/lock.json")
+	if len(got) != 3 {
+		t.Fatalf("got %d paths, want 3", len(got))
+	}
+}
+
+func TestParseLockPaths_TrimsSpaces(t *testing.T) {
+	got := parseLockPaths(" /a/lock.json , /b/lock.json ")
+	if len(got) != 2 {
+		t.Fatalf("got %d paths, want 2", len(got))
+	}
+	if got[0] != "/a/lock.json" {
+		t.Errorf("got[0] = %q, want trimmed", got[0])
+	}
+	if got[1] != "/b/lock.json" {
+		t.Errorf("got[1] = %q, want trimmed", got[1])
+	}
+}
+
+func TestParseLockPaths_SkipsEmptyEntries(t *testing.T) {
+	got := parseLockPaths("/a/lock.json,,/b/lock.json,")
+	if len(got) != 2 {
+		t.Errorf("got %v, want 2 entries", got)
+	}
+}
+
+// --- heartbeat clawhub_skills serialization ---
+
+func TestHeartbeat_OmitsClawhubSkillsWhenNil(t *testing.T) {
+	hb := heartbeat{
+		ClawID:       "test",
+		WindowStart:  time.Now().UTC(),
+		WindowEnd:    time.Now().UTC(),
+		Model:        "claude-opus-4-6",
+		InputTokens:  100,
+		OutputTokens: 50,
+		MessageCount: 1,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+	if _, present := m["clawhub_skills"]; present {
+		t.Error("clawhub_skills should be omitted when nil")
+	}
+}
+
+func TestHeartbeat_IncludesClawhubSkillsWhenSet(t *testing.T) {
+	hb := heartbeat{
+		ClawID:        "test",
+		ClawhubSkills: []skill{{Slug: "granola", Version: "1.0.0"}},
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+	skillsRaw, ok := m["clawhub_skills"]
+	if !ok {
+		t.Fatal("clawhub_skills missing from payload")
+	}
+	skillsList, ok := skillsRaw.([]interface{})
+	if !ok || len(skillsList) != 1 {
+		t.Fatalf("clawhub_skills shape unexpected: %v", skillsRaw)
+	}
+	first := skillsList[0].(map[string]interface{})
+	if first["slug"] != "granola" {
+		t.Errorf("slug = %v, want granola", first["slug"])
+	}
+	if first["version"] != "1.0.0" {
+		t.Errorf("version = %v, want 1.0.0", first["version"])
+	}
+	if len(first) != 2 {
+		t.Errorf("skill has %d fields, want exactly 2 (slug, version)", len(first))
+	}
+}
+
+func TestHeartbeat_OmitsClawhubSkillsWhenEmpty(t *testing.T) {
+	hb := heartbeat{ClawID: "test", ClawhubSkills: nil}
+	data, _ := json.Marshal(hb)
+	if bytes.Contains(data, []byte("clawhub_skills")) {
+		t.Errorf("nil ClawhubSkills should be omitted; got %s", data)
+	}
+}
+
+// --- pollWithURL skills wiring tests ---
+
+func TestPoll_IncludesSkillsOnFirstSend(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	var receivedHB heartbeat
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &receivedHB)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	valid, _, _, _ := lockFixtures(t)
+	cursor := time.Now().UTC().Add(-time.Hour)
+	_, newHash, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		[]string{valid}, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receivedHB.ClawhubSkills) != 2 {
+		t.Errorf("ClawhubSkills len = %d, want 2", len(receivedHB.ClawhubSkills))
+	}
+	if newHash == "" {
+		t.Error("expected non-empty new hash")
+	}
+}
+
+func TestPoll_OmitsSkillsWhenHashUnchanged(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	var receivedRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedRaw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	valid, _, _, _ := lockFixtures(t)
+	expectedHash := hashSkills(loadSkills([]string{valid}))
+
+	cursor := time.Now().UTC().Add(-time.Hour)
+	_, newHash, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		[]string{valid}, expectedHash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(receivedRaw, []byte("clawhub_skills")) {
+		t.Errorf("clawhub_skills should be omitted when hash unchanged; got %s", receivedRaw)
+	}
+	if newHash != expectedHash {
+		t.Errorf("hash should be unchanged; got %q, want %q", newHash, expectedHash)
+	}
+}
+
+func TestPoll_NoSkillsWhenNoLockPaths(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	var receivedRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedRaw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	cursor := time.Now().UTC().Add(-time.Hour)
+	_, newHash, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		nil, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(receivedRaw, []byte("clawhub_skills")) {
+		t.Errorf("clawhub_skills should be absent when no lock paths configured")
+	}
+	if newHash != hashSkills(nil) {
+		t.Errorf("expected hash of empty skills list, got %q", newHash)
+	}
+}
+
+func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	valid, _, _, _ := lockFixtures(t)
+	cursor := time.Now().UTC().Add(-time.Hour)
+
+	_, hash1, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		nil, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, hash2, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		[]string{valid}, hash1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hash1 == hash2 {
+		t.Error("hash should change when skills set changes")
 	}
 }

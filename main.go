@@ -9,10 +9,17 @@
 // It reads nothing else. No prompts. No responses. No tool calls.
 // No session IDs. No file paths. No hostnames.
 //
+// When CLAWTEL_CLAWHUB_LOCKS is set, clawtel ALSO reads
+// .clawhub/lock.json files at the configured paths. From each file it reads
+// only `version` (top-level, must be 1) and `skills.<slug>.version`.
+// It NEVER reads `installedAt` or any other field. It NEVER reads SKILL.md
+// content from disk.
+//
 // The payload sent to claw.tech contains:
 //
 //   claw_id, window_start, window_end, model,
-//   input_tokens (from prompt_tokens), output_tokens (from completion_tokens), message_count
+//   input_tokens (from prompt_tokens), output_tokens (from completion_tokens),
+//   message_count, and optionally clawhub_skills (slug + version per skill).
 //
 // That is the complete list. You can verify this by reading send().
 //
@@ -27,7 +34,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,6 +44,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +69,13 @@ type heartbeat struct {
 	InputTokens  int64     `json:"input_tokens"`
 	OutputTokens int64     `json:"output_tokens"`
 	MessageCount int64     `json:"message_count"`
+
+	// ClawhubSkills lists clawhub-installed skills discovered from
+	// CLAWTEL_CLAWHUB_LOCKS lock files. Optional. Omitted when unchanged
+	// since the last successful send so the server keeps last-known state.
+	// Each entry contains ONLY slug and version. No paths, timestamps, or
+	// content from the lock file are transmitted.
+	ClawhubSkills []skill `json:"clawhub_skills,omitempty"`
 }
 
 // row is what clawtel reads from tapes.sqlite.
@@ -90,12 +109,19 @@ func main() {
 
 	cursorPath := resolveCursorPath(dbPath)
 
+	lockPaths := parseLockPaths(os.Getenv("CLAWTEL_CLAWHUB_LOCKS"))
+
 	log.Printf("clawtel %s", version)
 	log.Printf("db:     %s", dbPath)
 	log.Printf("cursor: %s", cursorPath)
 	log.Printf("claw:   %s", clawID)
 	log.Printf("reads:  created_at, model, prompt_tokens, completion_tokens (from nodes table)")
 	log.Printf("sends:  tokens + model counts only. no prompts. no responses.")
+	if len(lockPaths) > 0 {
+		log.Printf("clawhub locks: %d paths configured", len(lockPaths))
+		log.Printf("clawhub:  reads lock.json fields: version, skills.<slug>.version (nothing else)")
+		log.Printf("clawhub:  NOTE: lock.json contains \"installedAt\" timestamp, clawtel does NOT read it")
+	}
 
 	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
 	if err != nil {
@@ -123,17 +149,20 @@ func main() {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	var lastSkillsHash string
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("shutting down")
 			return
 		case <-ticker.C:
-			newCursor, err := poll(db, client, ingestKey, clawID, cursor)
+			newCursor, newHash, err := poll(db, client, ingestKey, clawID, cursor, lockPaths, lastSkillsHash)
 			if err != nil {
 				log.Printf("poll error: %v", err)
 				continue
 			}
+			lastSkillsHash = newHash
 			if newCursor.After(cursor) {
 				cursor = newCursor
 				if err := saveCursor(cursorPath, cursor); err != nil {
@@ -147,33 +176,42 @@ func main() {
 // poll reads new rows since cursor, aggregates, and sends a heartbeat.
 // A heartbeat is always sent — even with zero new rows — so that
 // claw.tech can distinguish "online but idle" from "offline".
-// Returns the new cursor timestamp on success.
-func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time) (time.Time, error) {
-	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor)
+// Returns the new cursor timestamp and the new skills hash on success.
+func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
+	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor, lockPaths, lastSkillsHash)
 }
 
 // pollWithURL is the testable version of poll that accepts a custom endpoint URL.
-func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time) (time.Time, error) {
+func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
 	windowStart := cursor
 	windowEnd := time.Now().UTC()
 
 	rows, err := readRows(db, cursor)
 	if err != nil {
-		return cursor, fmt.Errorf("read: %v", err)
+		return cursor, lastSkillsHash, fmt.Errorf("read: %v", err)
 	}
 
 	hb := aggregate(clawID, windowStart, windowEnd, rows)
 
+	skills := loadSkills(lockPaths)
+	newHash := hashSkills(skills)
+	if newHash != lastSkillsHash {
+		hb.ClawhubSkills = skills
+	}
+
 	if err := sendToURL(client, url, ingestKey, hb); err != nil {
-		return cursor, fmt.Errorf("send: %v", err)
+		return cursor, lastSkillsHash, fmt.Errorf("send: %v", err)
 	}
 
 	if len(rows) > 0 {
 		log.Printf("sent: %d turns, %d in, %d out, model=%s",
 			hb.MessageCount, hb.InputTokens, hb.OutputTokens, hb.Model)
 	}
+	if len(hb.ClawhubSkills) > 0 {
+		log.Printf("sent: %d clawhub skills (hash changed)", len(hb.ClawhubSkills))
+	}
 
-	return windowEnd, nil
+	return windowEnd, newHash, nil
 }
 
 // readRows queries ONLY these four columns from the nodes table.
@@ -399,4 +437,167 @@ func loadCursor(path string) (time.Time, error) {
 
 func saveCursor(path string, t time.Time) error {
 	return os.WriteFile(path, []byte(t.UTC().Format(time.RFC3339Nano)), 0600)
+}
+
+// skill is the per-skill payload sent to claw.tech for clawhub-installed skills.
+// Only slug and version. Never installedAt, paths, or any other metadata.
+type skill struct {
+	Slug    string `json:"slug"`
+	Version string `json:"version"`
+}
+
+// lockFile is the on-disk shape of <workdir>/.clawhub/lock.json.
+// Only the version field per skill is read.
+type lockFile struct {
+	Version int                      `json:"version"`
+	Skills  map[string]lockFileEntry `json:"skills"`
+}
+
+// lockFileEntry intentionally omits installedAt — clawtel never reads it.
+type lockFileEntry struct {
+	Version string `json:"version"`
+}
+
+// parseLockFile reads one .clawhub/lock.json and returns slug -> version.
+// Returns an error on missing file, malformed JSON, or unsupported lock version.
+func parseLockFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var lf lockFile
+	if err := json.Unmarshal(data, &lf); err != nil {
+		return nil, fmt.Errorf("parse %s: %v", path, err)
+	}
+	if lf.Version != 1 {
+		return nil, fmt.Errorf("%s: unsupported lock version %d (want 1)", path, lf.Version)
+	}
+	out := make(map[string]string, len(lf.Skills))
+	for slug, entry := range lf.Skills {
+		out[slug] = entry.Version
+	}
+	return out, nil
+}
+
+// compareSemver returns -1 if a<b, 0 if a==b, 1 if a>b.
+// Compares dotted components numerically when possible, lexically otherwise.
+// Missing trailing components are treated as 0 ("1.0" == "1.0.0").
+func compareSemver(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a == "" {
+		return -1
+	}
+	if b == "" {
+		return 1
+	}
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	n := len(aParts)
+	if len(bParts) > n {
+		n = len(bParts)
+	}
+	for i := 0; i < n; i++ {
+		ap := "0"
+		bp := "0"
+		if i < len(aParts) {
+			ap = aParts[i]
+		}
+		if i < len(bParts) {
+			bp = bParts[i]
+		}
+		ai, aErr := strconv.Atoi(ap)
+		bi, bErr := strconv.Atoi(bp)
+		if aErr == nil && bErr == nil {
+			if ai != bi {
+				if ai < bi {
+					return -1
+				}
+				return 1
+			}
+			continue
+		}
+		if ap != bp {
+			if ap < bp {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// dedupeSkills merges multiple slug->version maps into a sorted []skill.
+// On version conflict for the same slug, keeps the highest semver and logs.
+// Always returns a non-nil slice so callers can safely len() and json-marshal.
+func dedupeSkills(maps []map[string]string) []skill {
+	merged := map[string]string{}
+	for _, m := range maps {
+		for slug, version := range m {
+			cur, exists := merged[slug]
+			if !exists {
+				merged[slug] = version
+				continue
+			}
+			cmp := compareSemver(version, cur)
+			if cmp > 0 {
+				log.Printf("clawhub skill %q: keeping %s over %s (higher semver)", slug, version, cur)
+				merged[slug] = version
+			} else if cmp < 0 {
+				log.Printf("clawhub skill %q: keeping %s over %s (higher semver)", slug, cur, version)
+			}
+		}
+	}
+	out := make([]skill, 0, len(merged))
+	for slug, version := range merged {
+		out = append(out, skill{Slug: slug, Version: version})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out
+}
+
+// loadSkills reads every configured lock.json, dedupes, and returns a sorted slice.
+// Missing or malformed files are logged and skipped — the heartbeat loop must
+// never fail because a lock file is bad. Always returns a non-nil slice.
+func loadSkills(paths []string) []skill {
+	maps := make([]map[string]string, 0, len(paths))
+	for _, p := range paths {
+		m, err := parseLockFile(p)
+		if err != nil {
+			log.Printf("clawhub: skipping %s: %v", p, err)
+			continue
+		}
+		maps = append(maps, m)
+	}
+	return dedupeSkills(maps)
+}
+
+// hashSkills returns a stable sha256 hex digest of the skills list.
+// Sorts defensively so callers cannot break the stability contract.
+// Used to detect whether the skills set changed since the last sent heartbeat.
+func hashSkills(skills []skill) string {
+	cp := make([]skill, len(skills))
+	copy(cp, skills)
+	sort.Slice(cp, func(i, j int) bool { return cp[i].Slug < cp[j].Slug })
+	data, _ := json.Marshal(cp)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// parseLockPaths splits CLAWTEL_CLAWHUB_LOCKS on commas, trims whitespace,
+// and drops empty entries. Returns nil for an empty/unset value.
+func parseLockPaths(env string) []string {
+	if env == "" {
+		return nil
+	}
+	parts := strings.Split(env, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
