@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "skills": {
+    "granola":         { "version": "1.0.0", "installedAt": 1775635621739 },
+    "openclaw-linear": { "version": "1.0.1", "installedAt": 1775635629099 }
+  }
+}

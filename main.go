@@ -400,3 +400,43 @@ func loadCursor(path string) (time.Time, error) {
 func saveCursor(path string, t time.Time) error {
 	return os.WriteFile(path, []byte(t.UTC().Format(time.RFC3339Nano)), 0600)
 }
+
+// skill is the per-skill payload sent to claw.tech for clawhub-installed skills.
+// Only slug and version. Never installedAt, paths, or any other metadata.
+type skill struct {
+	Slug    string `json:"slug"`
+	Version string `json:"version"`
+}
+
+// lockFile is the on-disk shape of <workdir>/.clawhub/lock.json.
+// Only the version field per skill is read.
+type lockFile struct {
+	Version int                      `json:"version"`
+	Skills  map[string]lockFileEntry `json:"skills"`
+}
+
+// lockFileEntry intentionally omits installedAt — clawtel never reads it.
+type lockFileEntry struct {
+	Version string `json:"version"`
+}
+
+// parseLockFile reads one .clawhub/lock.json and returns slug -> version.
+// Returns an error on missing file, malformed JSON, or unsupported lock version.
+func parseLockFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var lf lockFile
+	if err := json.Unmarshal(data, &lf); err != nil {
+		return nil, fmt.Errorf("parse %s: %v", path, err)
+	}
+	if lf.Version != 1 {
+		return nil, fmt.Errorf("%s: unsupported lock version %d (want 1)", path, lf.Version)
+	}
+	out := make(map[string]string, len(lf.Skills))
+	for slug, entry := range lf.Skills {
+		out[slug] = entry.Version
+	}
+	return out, nil
+}

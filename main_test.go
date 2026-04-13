@@ -751,3 +751,70 @@ func TestHeartbeat_JSONFormat(t *testing.T) {
 		t.Errorf("message_count = %v", m["message_count"])
 	}
 }
+
+// --- parseLockFile tests ---
+
+func TestParseLockFile_Valid(t *testing.T) {
+	got, err := parseLockFile("testdata/lock_valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d skills, want 2", len(got))
+	}
+	if got["granola"] != "1.0.0" {
+		t.Errorf("granola = %q, want 1.0.0", got["granola"])
+	}
+	if got["openclaw-linear"] != "1.0.1" {
+		t.Errorf("openclaw-linear = %q, want 1.0.1", got["openclaw-linear"])
+	}
+}
+
+func TestParseLockFile_Malformed(t *testing.T) {
+	_, err := parseLockFile("testdata/lock_malformed.json")
+	if err == nil {
+		t.Fatal("expected parse error for malformed JSON, got nil")
+	}
+}
+
+func TestParseLockFile_Missing(t *testing.T) {
+	_, err := parseLockFile("testdata/does_not_exist.json")
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+}
+
+func TestParseLockFile_WrongShape(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "lock.json")
+	os.WriteFile(tmp, []byte(`{"version": 2, "skills": {}}`), 0600)
+
+	_, err := parseLockFile(tmp)
+	if err == nil {
+		t.Fatal("expected error for unsupported lock version, got nil")
+	}
+}
+
+func TestParseLockFile_EmptySkills(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "lock.json")
+	os.WriteFile(tmp, []byte(`{"version": 1, "skills": {}}`), 0600)
+
+	got, err := parseLockFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+func TestParseLockFile_IgnoresInstalledAt(t *testing.T) {
+	got, err := parseLockFile("testdata/lock_valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for slug, v := range got {
+		if v == "" {
+			t.Errorf("skill %q has empty version", slug)
+		}
+	}
+}
