@@ -551,3 +551,20 @@ func hashSkills(skills []skill) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// parseLockPaths splits CLAWTEL_CLAWHUB_LOCKS on commas, trims whitespace,
+// and drops empty entries. Returns nil for an empty/unset value.
+func parseLockPaths(env string) []string {
+	if env == "" {
+		return nil
+	}
+	parts := strings.Split(env, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

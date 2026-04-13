@@ -1038,3 +1038,46 @@ func TestHashSkills_OrderInsensitive(t *testing.T) {
 		t.Error("hash should be order-insensitive")
 	}
 }
+
+// --- parseLockPaths tests ---
+
+func TestParseLockPaths_Empty(t *testing.T) {
+	got := parseLockPaths("")
+	if len(got) != 0 {
+		t.Errorf("got %d paths, want 0", len(got))
+	}
+}
+
+func TestParseLockPaths_Single(t *testing.T) {
+	got := parseLockPaths("/root/clawchief/.clawhub/lock.json")
+	if len(got) != 1 || got[0] != "/root/clawchief/.clawhub/lock.json" {
+		t.Errorf("got %v, want [/root/clawchief/.clawhub/lock.json]", got)
+	}
+}
+
+func TestParseLockPaths_Multiple(t *testing.T) {
+	got := parseLockPaths("/a/lock.json,/b/lock.json,/c/lock.json")
+	if len(got) != 3 {
+		t.Fatalf("got %d paths, want 3", len(got))
+	}
+}
+
+func TestParseLockPaths_TrimsSpaces(t *testing.T) {
+	got := parseLockPaths(" /a/lock.json , /b/lock.json ")
+	if len(got) != 2 {
+		t.Fatalf("got %d paths, want 2", len(got))
+	}
+	if got[0] != "/a/lock.json" {
+		t.Errorf("got[0] = %q, want trimmed", got[0])
+	}
+	if got[1] != "/b/lock.json" {
+		t.Errorf("got[1] = %q, want trimmed", got[1])
+	}
+}
+
+func TestParseLockPaths_SkipsEmptyEntries(t *testing.T) {
+	got := parseLockPaths("/a/lock.json,,/b/lock.json,")
+	if len(got) != 2 {
+		t.Errorf("got %v, want 2 entries", got)
+	}
+}
