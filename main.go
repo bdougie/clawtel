@@ -216,6 +216,11 @@ func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string,
 
 // readRows queries ONLY these four columns from the nodes table.
 // This is the complete read surface.
+//
+// Both sides of the timestamp comparison are wrapped in SQLite's datetime()
+// so tapes' on-disk format (space separator, numeric offset) and clawtel's
+// RFC3339Nano cursor compare correctly regardless of textual representation.
+// See issue #4 for the silent-zero-rows bug this prevents.
 func readRows(db *sql.DB, since time.Time) ([]row, error) {
 	const query = `
 		SELECT
@@ -224,8 +229,8 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 			prompt_tokens,
 			completion_tokens
 		FROM nodes
-		WHERE created_at > ?
-		ORDER BY created_at ASC
+		WHERE datetime(created_at) > datetime(?)
+		ORDER BY datetime(created_at) ASC
 	`
 
 	sqlRows, err := db.Query(query, since.UTC().Format(time.RFC3339Nano))
@@ -241,13 +246,37 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 		if err := sqlRows.Scan(&createdAtStr, &r.model, &r.promptTokens, &r.completionTokens); err != nil {
 			return nil, err
 		}
-		r.createdAt, err = time.Parse(time.RFC3339Nano, createdAtStr)
+		r.createdAt, err = parseCreatedAt(createdAtStr)
 		if err != nil {
 			return nil, fmt.Errorf("parse created_at: %v", err)
 		}
 		out = append(out, r)
 	}
 	return out, sqlRows.Err()
+}
+
+// parseCreatedAt accepts both RFC3339Nano (T/Z) and SQLite's default
+// CURRENT_TIMESTAMP format (space separator, numeric offset). Tapes writes
+// the latter; clawtel has historically written the former to the cursor file.
+func parseCreatedAt(s string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05Z07:00",
+	}
+	var firstErr error
+	for _, layout := range layouts {
+		t, err := time.Parse(layout, s)
+		if err == nil {
+			return t, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return time.Time{}, firstErr
 }
 
 // aggregate builds the heartbeat payload from raw rows.
