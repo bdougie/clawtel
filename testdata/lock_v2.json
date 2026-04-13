@@ -1,7 +1,0 @@
-{
-  "version": 1,
-  "skills": {
-    "granola":   { "version": "1.2.0", "installedAt": 1775635621740 },
-    "tapes-cli": { "version": "0.3.0", "installedAt": 1775635629100 }
-  }
-}

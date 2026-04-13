@@ -57,6 +57,44 @@ func insertRow(t *testing.T, db *sql.DB, createdAt time.Time, model string, prom
 	}
 }
 
+// lockFixtures writes the canonical lock.json fixtures used across clawhub tests
+// to a fresh t.TempDir() and returns paths. `missing` points at a file that is
+// never created — useful for "skip missing file" assertions.
+func lockFixtures(t *testing.T) (valid, malformed, v2, missing string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	valid = filepath.Join(dir, "lock_valid.json")
+	if err := os.WriteFile(valid, []byte(`{
+  "version": 1,
+  "skills": {
+    "granola":         { "version": "1.0.0", "installedAt": 1775635621739 },
+    "openclaw-linear": { "version": "1.0.1", "installedAt": 1775635629099 }
+  }
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	malformed = filepath.Join(dir, "lock_malformed.json")
+	if err := os.WriteFile(malformed, []byte(`{ this is not valid json`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	v2 = filepath.Join(dir, "lock_v2.json")
+	if err := os.WriteFile(v2, []byte(`{
+  "version": 1,
+  "skills": {
+    "granola":   { "version": "1.2.0", "installedAt": 1775635621740 },
+    "tapes-cli": { "version": "0.3.0", "installedAt": 1775635629100 }
+  }
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	missing = filepath.Join(dir, "does_not_exist.json")
+	return
+}
+
 // --- aggregate tests ---
 
 func TestAggregate_EmptyRows(t *testing.T) {
@@ -756,7 +794,8 @@ func TestHeartbeat_JSONFormat(t *testing.T) {
 // --- parseLockFile tests ---
 
 func TestParseLockFile_Valid(t *testing.T) {
-	got, err := parseLockFile("testdata/lock_valid.json")
+	valid, _, _, _ := lockFixtures(t)
+	got, err := parseLockFile(valid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,14 +811,16 @@ func TestParseLockFile_Valid(t *testing.T) {
 }
 
 func TestParseLockFile_Malformed(t *testing.T) {
-	_, err := parseLockFile("testdata/lock_malformed.json")
+	_, malformed, _, _ := lockFixtures(t)
+	_, err := parseLockFile(malformed)
 	if err == nil {
 		t.Fatal("expected parse error for malformed JSON, got nil")
 	}
 }
 
 func TestParseLockFile_Missing(t *testing.T) {
-	_, err := parseLockFile("testdata/does_not_exist.json")
+	_, _, _, missing := lockFixtures(t)
+	_, err := parseLockFile(missing)
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
@@ -809,7 +850,8 @@ func TestParseLockFile_EmptySkills(t *testing.T) {
 }
 
 func TestParseLockFile_IgnoresInstalledAt(t *testing.T) {
-	got, err := parseLockFile("testdata/lock_valid.json")
+	valid, _, _, _ := lockFixtures(t)
+	got, err := parseLockFile(valid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -935,7 +977,8 @@ func TestLoadSkills_NoPaths(t *testing.T) {
 }
 
 func TestLoadSkills_SingleValidFile(t *testing.T) {
-	got := loadSkills([]string{"testdata/lock_valid.json"})
+	valid, _, _, _ := lockFixtures(t)
+	got := loadSkills([]string{valid})
 	if len(got) != 2 {
 		t.Fatalf("got %d skills, want 2", len(got))
 	}
@@ -945,10 +988,8 @@ func TestLoadSkills_SingleValidFile(t *testing.T) {
 }
 
 func TestLoadSkills_MultipleFilesWithDedupe(t *testing.T) {
-	got := loadSkills([]string{
-		"testdata/lock_valid.json",
-		"testdata/lock_v2.json",
-	})
+	valid, _, v2, _ := lockFixtures(t)
+	got := loadSkills([]string{valid, v2})
 	if len(got) != 3 {
 		t.Fatalf("got %d skills, want 3", len(got))
 	}
@@ -968,30 +1009,24 @@ func TestLoadSkills_MultipleFilesWithDedupe(t *testing.T) {
 }
 
 func TestLoadSkills_SkipsMalformed(t *testing.T) {
-	got := loadSkills([]string{
-		"testdata/lock_valid.json",
-		"testdata/lock_malformed.json",
-	})
+	valid, malformed, _, _ := lockFixtures(t)
+	got := loadSkills([]string{valid, malformed})
 	if len(got) != 2 {
 		t.Errorf("got %d skills, want 2 (malformed skipped)", len(got))
 	}
 }
 
 func TestLoadSkills_SkipsMissing(t *testing.T) {
-	got := loadSkills([]string{
-		"testdata/lock_valid.json",
-		"testdata/does_not_exist.json",
-	})
+	valid, _, _, missing := lockFixtures(t)
+	got := loadSkills([]string{valid, missing})
 	if len(got) != 2 {
 		t.Errorf("got %d skills, want 2 (missing skipped)", len(got))
 	}
 }
 
 func TestLoadSkills_AllInvalid(t *testing.T) {
-	got := loadSkills([]string{
-		"testdata/does_not_exist.json",
-		"testdata/lock_malformed.json",
-	})
+	_, malformed, _, missing := lockFixtures(t)
+	got := loadSkills([]string{missing, malformed})
 	if len(got) != 0 {
 		t.Errorf("got %d skills, want 0 (all invalid)", len(got))
 	}
@@ -1161,10 +1196,11 @@ func TestPoll_IncludesSkillsOnFirstSend(t *testing.T) {
 	}))
 	defer server.Close()
 
+	valid, _, _, _ := lockFixtures(t)
 	cursor := time.Now().UTC().Add(-time.Hour)
 	_, newHash, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		[]string{"testdata/lock_valid.json"}, "",
+		[]string{valid}, "",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1188,12 +1224,13 @@ func TestPoll_OmitsSkillsWhenHashUnchanged(t *testing.T) {
 	}))
 	defer server.Close()
 
-	expectedHash := hashSkills(loadSkills([]string{"testdata/lock_valid.json"}))
+	valid, _, _, _ := lockFixtures(t)
+	expectedHash := hashSkills(loadSkills([]string{valid}))
 
 	cursor := time.Now().UTC().Add(-time.Hour)
 	_, newHash, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		[]string{"testdata/lock_valid.json"}, expectedHash,
+		[]string{valid}, expectedHash,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1242,6 +1279,7 @@ func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
 	}))
 	defer server.Close()
 
+	valid, _, _, _ := lockFixtures(t)
 	cursor := time.Now().UTC().Add(-time.Hour)
 
 	_, hash1, err := pollWithURL(
@@ -1254,7 +1292,7 @@ func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
 
 	_, hash2, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		[]string{"testdata/lock_valid.json"}, hash1,
+		[]string{valid}, hash1,
 	)
 	if err != nil {
 		t.Fatal(err)
