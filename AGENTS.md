@@ -18,11 +18,14 @@ tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/
 - **Polling:** every 60 minutes, sends even when idle (presence ping)
 - **Cursor:** timestamp file next to the DB tracks last-seen row
 
+When `CLAWTEL_CLAWHUB_LOCKS` is set, clawtel also reads `.clawhub/lock.json` files at the configured paths and adds an optional `clawhub_skills` array (slug + version only) to the heartbeat. The field is omitted when unchanged since the last successful send.
+
 ## Security constraints
 
 This is the most important section. clawtel runs on users' machines next to their private conversation data.
 
 - **Never read or access** `content`, `bucket`, `project`, or `agent_name` columns from tapes
+- **Never read** any field from `.clawhub/lock.json` other than top-level `version` and `skills.<slug>.version`. Never read `installedAt`, never read `SKILL.md` content from the workdir
 - **Never add** session IDs, file paths, hostnames, IP addresses, or any PII to the heartbeat payload
 - **Never change** the `heartbeat` struct fields without explicit review — this is the network contract
 - **`assertSchema`** must fail hard if required columns are missing and warn about sensitive columns
@@ -74,6 +77,7 @@ Pure Go via `modernc.org/sqlite` — no CGO, no C toolchain needed.
 | `CLAW_INGEST_KEY` | Yes (or silent exit) | Bearer token for claw.tech ingest (`ik_...` format) |
 | `CLAW_ID` | Yes (when key is set) | Your claw identifier on the leaderboard |
 | `TAPES_DB` | No | Override path to tapes.sqlite |
+| `CLAWTEL_CLAWHUB_LOCKS` | No | Comma-separated absolute paths to `.clawhub/lock.json` files. When set, slug+version of each installed clawhub skill is added to the heartbeat |
 
 ## Releases
 
