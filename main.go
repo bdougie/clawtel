@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -490,4 +491,33 @@ func compareSemver(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// dedupeSkills merges multiple slug->version maps into a sorted []skill.
+// On version conflict for the same slug, keeps the highest semver and logs.
+// Always returns a non-nil slice so callers can safely len() and json-marshal.
+func dedupeSkills(maps []map[string]string) []skill {
+	merged := map[string]string{}
+	for _, m := range maps {
+		for slug, version := range m {
+			cur, exists := merged[slug]
+			if !exists {
+				merged[slug] = version
+				continue
+			}
+			cmp := compareSemver(version, cur)
+			if cmp > 0 {
+				log.Printf("clawhub skill %q: keeping %s over %s (higher semver)", slug, version, cur)
+				merged[slug] = version
+			} else if cmp < 0 {
+				log.Printf("clawhub skill %q: keeping %s over %s (higher semver)", slug, cur, version)
+			}
+		}
+	}
+	out := make([]skill, 0, len(merged))
+	for slug, version := range merged {
+		out = append(out, skill{Slug: slug, Version: version})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out
 }

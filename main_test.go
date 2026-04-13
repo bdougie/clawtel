@@ -852,3 +852,72 @@ func TestCompareSemver_NonNumeric(t *testing.T) {
 		t.Error("compareSemver should distinguish 1.0.0-beta from 1.0.0-alpha")
 	}
 }
+
+// --- dedupeSkills tests ---
+
+func TestDedupeSkills_SingleSource(t *testing.T) {
+	in := []map[string]string{
+		{"granola": "1.0.0", "openclaw-linear": "1.0.1"},
+	}
+	got := dedupeSkills(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d skills, want 2", len(got))
+	}
+	if got[0].Slug != "granola" {
+		t.Errorf("got[0].Slug = %q, want granola", got[0].Slug)
+	}
+	if got[1].Slug != "openclaw-linear" {
+		t.Errorf("got[1].Slug = %q, want openclaw-linear", got[1].Slug)
+	}
+}
+
+func TestDedupeSkills_KeepsHighestVersion(t *testing.T) {
+	in := []map[string]string{
+		{"granola": "1.0.0"},
+		{"granola": "1.2.0"},
+		{"granola": "1.1.0"},
+	}
+	got := dedupeSkills(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d skills, want 1", len(got))
+	}
+	if got[0].Version != "1.2.0" {
+		t.Errorf("Version = %q, want 1.2.0", got[0].Version)
+	}
+}
+
+func TestDedupeSkills_MergesDistinctSlugs(t *testing.T) {
+	in := []map[string]string{
+		{"granola": "1.0.0"},
+		{"tapes-cli": "0.3.0"},
+		{"openclaw-linear": "1.0.1"},
+	}
+	got := dedupeSkills(in)
+	if len(got) != 3 {
+		t.Fatalf("got %d skills, want 3", len(got))
+	}
+	expectedOrder := []string{"granola", "openclaw-linear", "tapes-cli"}
+	for i, want := range expectedOrder {
+		if got[i].Slug != want {
+			t.Errorf("got[%d].Slug = %q, want %q", i, got[i].Slug, want)
+		}
+	}
+}
+
+func TestDedupeSkills_Empty(t *testing.T) {
+	got := dedupeSkills(nil)
+	if got == nil {
+		t.Fatal("dedupeSkills(nil) returned nil, want empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+func TestDedupeSkills_EmptyMaps(t *testing.T) {
+	in := []map[string]string{{}, {}}
+	got := dedupeSkills(in)
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
