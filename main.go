@@ -521,3 +521,19 @@ func dedupeSkills(maps []map[string]string) []skill {
 	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
 	return out
 }
+
+// loadSkills reads every configured lock.json, dedupes, and returns a sorted slice.
+// Missing or malformed files are logged and skipped — the heartbeat loop must
+// never fail because a lock file is bad. Always returns a non-nil slice.
+func loadSkills(paths []string) []skill {
+	maps := make([]map[string]string, 0, len(paths))
+	for _, p := range paths {
+		m, err := parseLockFile(p)
+		if err != nil {
+			log.Printf("clawhub: skipping %s: %v", p, err)
+			continue
+		}
+		maps = append(maps, m)
+	}
+	return dedupeSkills(maps)
+}

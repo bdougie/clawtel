@@ -921,3 +921,75 @@ func TestDedupeSkills_EmptyMaps(t *testing.T) {
 		t.Errorf("got %d skills, want 0", len(got))
 	}
 }
+
+// --- loadSkills tests ---
+
+func TestLoadSkills_NoPaths(t *testing.T) {
+	got := loadSkills(nil)
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0", len(got))
+	}
+}
+
+func TestLoadSkills_SingleValidFile(t *testing.T) {
+	got := loadSkills([]string{"testdata/lock_valid.json"})
+	if len(got) != 2 {
+		t.Fatalf("got %d skills, want 2", len(got))
+	}
+	if got[0].Slug != "granola" || got[0].Version != "1.0.0" {
+		t.Errorf("got[0] = %+v, want {granola 1.0.0}", got[0])
+	}
+}
+
+func TestLoadSkills_MultipleFilesWithDedupe(t *testing.T) {
+	got := loadSkills([]string{
+		"testdata/lock_valid.json",
+		"testdata/lock_v2.json",
+	})
+	if len(got) != 3 {
+		t.Fatalf("got %d skills, want 3", len(got))
+	}
+	slugToVersion := map[string]string{}
+	for _, s := range got {
+		slugToVersion[s.Slug] = s.Version
+	}
+	if slugToVersion["granola"] != "1.2.0" {
+		t.Errorf("granola = %q, want 1.2.0 (highest)", slugToVersion["granola"])
+	}
+	if slugToVersion["openclaw-linear"] != "1.0.1" {
+		t.Errorf("openclaw-linear = %q, want 1.0.1", slugToVersion["openclaw-linear"])
+	}
+	if slugToVersion["tapes-cli"] != "0.3.0" {
+		t.Errorf("tapes-cli = %q, want 0.3.0", slugToVersion["tapes-cli"])
+	}
+}
+
+func TestLoadSkills_SkipsMalformed(t *testing.T) {
+	got := loadSkills([]string{
+		"testdata/lock_valid.json",
+		"testdata/lock_malformed.json",
+	})
+	if len(got) != 2 {
+		t.Errorf("got %d skills, want 2 (malformed skipped)", len(got))
+	}
+}
+
+func TestLoadSkills_SkipsMissing(t *testing.T) {
+	got := loadSkills([]string{
+		"testdata/lock_valid.json",
+		"testdata/does_not_exist.json",
+	})
+	if len(got) != 2 {
+		t.Errorf("got %d skills, want 2 (missing skipped)", len(got))
+	}
+}
+
+func TestLoadSkills_AllInvalid(t *testing.T) {
+	got := loadSkills([]string{
+		"testdata/does_not_exist.json",
+		"testdata/lock_malformed.json",
+	})
+	if len(got) != 0 {
+		t.Errorf("got %d skills, want 0 (all invalid)", len(got))
+	}
+}
