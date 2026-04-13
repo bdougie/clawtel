@@ -379,7 +379,7 @@ func TestPoll_Success(t *testing.T) {
 	defer server.Close()
 
 	cursor := now.Add(-time.Hour)
-	newCursor, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestPoll_SendError(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err == nil {
 		t.Fatal("expected error from send failure, got nil")
 	}
@@ -422,7 +422,7 @@ func TestPoll_EmptyDB(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +604,7 @@ func TestPoll_ReadError(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, pollErr := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor)
+	_, _, pollErr := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if pollErr == nil {
 		t.Fatal("expected error from readRows failure, got nil")
 	}
@@ -1142,5 +1142,123 @@ func TestHeartbeat_OmitsClawhubSkillsWhenEmpty(t *testing.T) {
 	data, _ := json.Marshal(hb)
 	if bytes.Contains(data, []byte("clawhub_skills")) {
 		t.Errorf("nil ClawhubSkills should be omitted; got %s", data)
+	}
+}
+
+// --- pollWithURL skills wiring tests ---
+
+func TestPoll_IncludesSkillsOnFirstSend(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	var receivedHB heartbeat
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &receivedHB)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	cursor := time.Now().UTC().Add(-time.Hour)
+	_, newHash, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		[]string{"testdata/lock_valid.json"}, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receivedHB.ClawhubSkills) != 2 {
+		t.Errorf("ClawhubSkills len = %d, want 2", len(receivedHB.ClawhubSkills))
+	}
+	if newHash == "" {
+		t.Error("expected non-empty new hash")
+	}
+}
+
+func TestPoll_OmitsSkillsWhenHashUnchanged(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	var receivedRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedRaw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	expectedHash := hashSkills(loadSkills([]string{"testdata/lock_valid.json"}))
+
+	cursor := time.Now().UTC().Add(-time.Hour)
+	_, newHash, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		[]string{"testdata/lock_valid.json"}, expectedHash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(receivedRaw, []byte("clawhub_skills")) {
+		t.Errorf("clawhub_skills should be omitted when hash unchanged; got %s", receivedRaw)
+	}
+	if newHash != expectedHash {
+		t.Errorf("hash should be unchanged; got %q, want %q", newHash, expectedHash)
+	}
+}
+
+func TestPoll_NoSkillsWhenNoLockPaths(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	var receivedRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedRaw, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	cursor := time.Now().UTC().Add(-time.Hour)
+	_, newHash, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		nil, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(receivedRaw, []byte("clawhub_skills")) {
+		t.Errorf("clawhub_skills should be absent when no lock paths configured")
+	}
+	if newHash != hashSkills(nil) {
+		t.Errorf("expected hash of empty skills list, got %q", newHash)
+	}
+}
+
+func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	cursor := time.Now().UTC().Add(-time.Hour)
+
+	_, hash1, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		nil, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, hash2, err := pollWithURL(
+		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
+		[]string{"testdata/lock_valid.json"}, hash1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hash1 == hash2 {
+		t.Error("hash should change when skills set changes")
 	}
 }

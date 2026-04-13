@@ -141,7 +141,7 @@ func main() {
 			log.Println("shutting down")
 			return
 		case <-ticker.C:
-			newCursor, err := poll(db, client, ingestKey, clawID, cursor)
+			newCursor, _, err := poll(db, client, ingestKey, clawID, cursor, nil, "")
 			if err != nil {
 				log.Printf("poll error: %v", err)
 				continue
@@ -159,33 +159,42 @@ func main() {
 // poll reads new rows since cursor, aggregates, and sends a heartbeat.
 // A heartbeat is always sent — even with zero new rows — so that
 // claw.tech can distinguish "online but idle" from "offline".
-// Returns the new cursor timestamp on success.
-func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time) (time.Time, error) {
-	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor)
+// Returns the new cursor timestamp and the new skills hash on success.
+func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
+	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor, lockPaths, lastSkillsHash)
 }
 
 // pollWithURL is the testable version of poll that accepts a custom endpoint URL.
-func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time) (time.Time, error) {
+func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
 	windowStart := cursor
 	windowEnd := time.Now().UTC()
 
 	rows, err := readRows(db, cursor)
 	if err != nil {
-		return cursor, fmt.Errorf("read: %v", err)
+		return cursor, lastSkillsHash, fmt.Errorf("read: %v", err)
 	}
 
 	hb := aggregate(clawID, windowStart, windowEnd, rows)
 
+	skills := loadSkills(lockPaths)
+	newHash := hashSkills(skills)
+	if newHash != lastSkillsHash {
+		hb.ClawhubSkills = skills
+	}
+
 	if err := sendToURL(client, url, ingestKey, hb); err != nil {
-		return cursor, fmt.Errorf("send: %v", err)
+		return cursor, lastSkillsHash, fmt.Errorf("send: %v", err)
 	}
 
 	if len(rows) > 0 {
 		log.Printf("sent: %d turns, %d in, %d out, model=%s",
 			hb.MessageCount, hb.InputTokens, hb.OutputTokens, hb.Model)
 	}
+	if len(hb.ClawhubSkills) > 0 {
+		log.Printf("sent: %d clawhub skills (hash changed)", len(hb.ClawhubSkills))
+	}
 
-	return windowEnd, nil
+	return windowEnd, newHash, nil
 }
 
 // readRows queries ONLY these four columns from the nodes table.
