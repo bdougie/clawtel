@@ -9,10 +9,17 @@
 // It reads nothing else. No prompts. No responses. No tool calls.
 // No session IDs. No file paths. No hostnames.
 //
+// When CLAWTEL_CLAWHUB_LOCKS is set, clawtel ALSO reads
+// .clawhub/lock.json files at the configured paths. From each file it reads
+// only `version` (top-level, must be 1) and `skills.<slug>.version`.
+// It NEVER reads `installedAt` or any other field. It NEVER reads SKILL.md
+// content from disk.
+//
 // The payload sent to claw.tech contains:
 //
 //   claw_id, window_start, window_end, model,
-//   input_tokens (from prompt_tokens), output_tokens (from completion_tokens), message_count
+//   input_tokens (from prompt_tokens), output_tokens (from completion_tokens),
+//   message_count, and optionally clawhub_skills (slug + version per skill).
 //
 // That is the complete list. You can verify this by reading send().
 //
@@ -102,12 +109,19 @@ func main() {
 
 	cursorPath := resolveCursorPath(dbPath)
 
+	lockPaths := parseLockPaths(os.Getenv("CLAWTEL_CLAWHUB_LOCKS"))
+
 	log.Printf("clawtel %s", version)
 	log.Printf("db:     %s", dbPath)
 	log.Printf("cursor: %s", cursorPath)
 	log.Printf("claw:   %s", clawID)
 	log.Printf("reads:  created_at, model, prompt_tokens, completion_tokens (from nodes table)")
 	log.Printf("sends:  tokens + model counts only. no prompts. no responses.")
+	if len(lockPaths) > 0 {
+		log.Printf("clawhub locks: %d paths configured", len(lockPaths))
+		log.Printf("clawhub:  reads lock.json fields: version, skills.<slug>.version (nothing else)")
+		log.Printf("clawhub:  NOTE: lock.json contains \"installedAt\" timestamp, clawtel does NOT read it")
+	}
 
 	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
 	if err != nil {
@@ -135,17 +149,20 @@ func main() {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	var lastSkillsHash string
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("shutting down")
 			return
 		case <-ticker.C:
-			newCursor, _, err := poll(db, client, ingestKey, clawID, cursor, nil, "")
+			newCursor, newHash, err := poll(db, client, ingestKey, clawID, cursor, lockPaths, lastSkillsHash)
 			if err != nil {
 				log.Printf("poll error: %v", err)
 				continue
 			}
+			lastSkillsHash = newHash
 			if newCursor.After(cursor) {
 				cursor = newCursor
 				if err := saveCursor(cursorPath, cursor); err != nil {
