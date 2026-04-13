@@ -667,16 +667,397 @@ func TestReadRows_BadTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Insert a row with an unparseable timestamp
+	// Insert a row with an unparseable timestamp. SQLite's datetime() returns
+	// NULL for this value and the row is filtered out of the WHERE clause —
+	// the poll loop keeps running on the valid rows instead of dying on one
+	// bad row. This is the same graceful-skip behavior loadSkills uses for
+	// malformed lock files.
 	_, err = db.Exec(`INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens)
 		VALUES ('not-a-timestamp', 'model', 100, 50)`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	rows, readErr := readRows(db, time.Time{})
+	if readErr != nil {
+		t.Fatalf("readRows should skip unparseable rows, got error: %v", readErr)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("got %d rows, want 0 (unparseable row should be filtered out)", len(rows))
+	}
+}
+
+// TestReadRows_ScanSideParseError exercises the rare case where SQLite's
+// datetime() accepts a stored value (so it passes the WHERE filter) but
+// our Go-side parseCreatedAt cannot parse the raw column text. A date-only
+// string "2026-04-13" is such a case: SQLite normalizes it to
+// "2026-04-13 00:00:00" for comparison, but the scan returns the raw text.
+func TestReadRows_ScanSideParseError(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	_, err := db.Exec(`INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens)
+		VALUES ('2026-04-13', 'model', 100, 50)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	_, readErr := readRows(db, time.Time{})
 	if readErr == nil {
-		t.Fatal("expected parse error, got nil")
+		t.Fatal("expected scan-side parse error, got nil")
+	}
+}
+
+// --- parseCreatedAt: direct unit tests for the fallback layout chain ---
+
+func TestParseCreatedAt_RFC3339Nano(t *testing.T) {
+	got, err := parseCreatedAt("2026-04-13T20:08:23.039251149Z")
+	if err != nil {
+		t.Fatalf("parseCreatedAt: %v", err)
+	}
+	if got.Year() != 2026 || got.Month() != 4 || got.Day() != 13 {
+		t.Errorf("parsed date = %v, want 2026-04-13", got)
+	}
+}
+
+func TestParseCreatedAt_TapesOnDiskFormat(t *testing.T) {
+	// Format SQLite's CURRENT_TIMESTAMP produces.
+	got, err := parseCreatedAt("2026-04-13 20:08:23.039251149+00:00")
+	if err != nil {
+		t.Fatalf("parseCreatedAt: %v", err)
+	}
+	if got.Year() != 2026 || got.Month() != 4 || got.Day() != 13 {
+		t.Errorf("parsed date = %v, want 2026-04-13", got)
+	}
+	if got.Hour() != 20 || got.Minute() != 8 {
+		t.Errorf("parsed time = %v, want 20:08", got)
+	}
+}
+
+func TestParseCreatedAt_TapesOnDiskFormat_NoFractional(t *testing.T) {
+	got, err := parseCreatedAt("2026-04-13 20:08:23+00:00")
+	if err != nil {
+		t.Fatalf("parseCreatedAt: %v", err)
+	}
+	if got.Hour() != 20 || got.Minute() != 8 || got.Second() != 23 {
+		t.Errorf("parsed time = %v, want 20:08:23", got)
+	}
+}
+
+func TestParseCreatedAt_Unparseable(t *testing.T) {
+	_, err := parseCreatedAt("not-a-timestamp")
+	if err == nil {
+		t.Fatal("expected error on unparseable input, got nil")
+	}
+}
+
+func TestParseCreatedAt_NonZeroOffset(t *testing.T) {
+	got, err := parseCreatedAt("2026-04-13 20:08:23.5-05:00")
+	if err != nil {
+		t.Fatalf("parseCreatedAt: %v", err)
+	}
+	// 20:08 at -05:00 == 01:08 UTC next day.
+	utc := got.UTC()
+	if utc.Day() != 14 || utc.Hour() != 1 || utc.Minute() != 8 {
+		t.Errorf("parsed UTC = %v, want 2026-04-14 01:08 UTC", utc)
+	}
+}
+
+// --- readRows: tapes on-disk timestamp format (issue #4) ---
+
+// insertRowTapesFormat writes a row using SQLite's default CURRENT_TIMESTAMP
+// format (space separator, numeric offset) — the format tapes actually uses.
+// See issue #4: the cursor is formatted as RFC3339Nano ("T"/"Z") but tapes
+// writes "2026-04-13 20:08:23.039251149+00:00". SQLite string-compares
+// these, so the RFC3339Nano cursor is always lexicographically greater
+// than any tapes-written row and WHERE created_at > ? returns nothing.
+func insertRowTapesFormat(t *testing.T, db *sql.DB, createdAt time.Time, model string, promptTokens, completionTokens int64) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?)`,
+		createdAt.UTC().Format("2006-01-02 15:04:05.999999999-07:00"), model, promptTokens, completionTokens,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadRows_TapesOnDiskFormat_AfterCursor(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	recent := now.Add(-30 * time.Minute)
+
+	// Row stored in tapes' on-disk format (space separator, numeric offset).
+	insertRowTapesFormat(t, db, recent, "tapes-format-model", 200, 100)
+
+	// Cursor one hour ago — recent row should be visible.
+	cursor := now.Add(-time.Hour)
+	rows, err := readRows(db, cursor)
+	if err != nil {
+		t.Fatalf("readRows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (row with space-separated timestamp should be visible)", len(rows))
+	}
+	if rows[0].model != "tapes-format-model" {
+		t.Errorf("model = %q, want %q", rows[0].model, "tapes-format-model")
+	}
+	if rows[0].promptTokens != 200 {
+		t.Errorf("promptTokens = %d, want 200", rows[0].promptTokens)
+	}
+}
+
+func TestReadRows_TapesOnDiskFormat_CursorStillFiltersOld(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	old := now.Add(-2 * time.Hour)
+	recent := now.Add(-30 * time.Minute)
+
+	insertRowTapesFormat(t, db, old, "old-model", 1, 1)
+	insertRowTapesFormat(t, db, recent, "new-model", 2, 2)
+
+	cursor := now.Add(-time.Hour)
+	rows, err := readRows(db, cursor)
+	if err != nil {
+		t.Fatalf("readRows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (old row should be filtered out)", len(rows))
+	}
+	if rows[0].model != "new-model" {
+		t.Errorf("model = %q, want %q", rows[0].model, "new-model")
+	}
+}
+
+// TestReadRows_TapesOnDiskFormat_MixedWithRFC3339 asserts readRows handles
+// a database containing both timestamp formats. This future-proofs the fix:
+// if tapes ever changes its storage format or clawtel's own writes land in
+// a test fixture, both should still be queryable.
+func TestReadRows_TapesOnDiskFormat_MixedWithRFC3339(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	rfcTime := now.Add(-40 * time.Minute)
+	tapesTime := now.Add(-20 * time.Minute)
+
+	insertRow(t, db, rfcTime, "rfc-model", 10, 5)
+	insertRowTapesFormat(t, db, tapesTime, "tapes-model", 20, 10)
+
+	cursor := now.Add(-time.Hour)
+	rows, err := readRows(db, cursor)
+	if err != nil {
+		t.Fatalf("readRows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (both formats should be visible)", len(rows))
+	}
+	// Rows must be in ascending order — rfcTime first, tapesTime second.
+	if rows[0].model != "rfc-model" {
+		t.Errorf("rows[0].model = %q, want %q", rows[0].model, "rfc-model")
+	}
+	if rows[1].model != "tapes-model" {
+		t.Errorf("rows[1].model = %q, want %q", rows[1].model, "tapes-model")
+	}
+}
+
+// --- integration tests: end-to-end bug reproductions (issue #4) ---
+
+// capturingServer records every heartbeat received so tests can assert
+// what actually left the process, not just what readRows returned.
+type capturingServer struct {
+	*httptest.Server
+	received []heartbeat
+}
+
+func newCapturingServer(t *testing.T) *capturingServer {
+	t.Helper()
+	cs := &capturingServer{}
+	cs.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var hb heartbeat
+		if err := json.Unmarshal(body, &hb); err != nil {
+			t.Errorf("server got invalid JSON: %v", err)
+		}
+		cs.received = append(cs.received, hb)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	return cs
+}
+
+// TestPoll_TwoPolls_TapesFormat_IssueRepro reproduces the exact bug flow
+// from issue #4: poll 1 sweeps existing rows and returns a fresh cursor;
+// a new row lands in tapes' on-disk format; poll 2 MUST see it.
+//
+// Before the fix, poll 2 returned zero rows because the cursor (RFC3339Nano)
+// was always lexicographically greater than any tapes-written timestamp.
+func TestPoll_TwoPolls_TapesFormat_IssueRepro(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	server := newCapturingServer(t)
+	defer server.Close()
+
+	// Initial data: one row that poll 1 should sweep.
+	now := time.Now().UTC()
+	insertRowTapesFormat(t, db, now.Add(-30*time.Minute), "before-poll-1", 100, 50)
+
+	// Poll 1. Cursor starts 1 hour ago so the existing row is visible.
+	cursor := now.Add(-time.Hour)
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if len(server.received) != 1 {
+		t.Fatalf("after poll 1: server got %d heartbeats, want 1", len(server.received))
+	}
+	if server.received[0].MessageCount != 1 {
+		t.Fatalf("poll 1 heartbeat: MessageCount = %d, want 1", server.received[0].MessageCount)
+	}
+
+	// Between polls: a new row lands, in tapes' on-disk format, AFTER the
+	// cursor poll 1 returned. This is the scenario the original bug silently
+	// dropped for every deployment after its first run.
+	afterFirstPoll := newCursor.Add(time.Minute)
+	insertRowTapesFormat(t, db, afterFirstPoll, "between-polls", 200, 100)
+
+	// Poll 2. Must see the new row.
+	_, _, err = pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", newCursor, nil, "")
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if len(server.received) != 2 {
+		t.Fatalf("after poll 2: server got %d heartbeats, want 2", len(server.received))
+	}
+	hb2 := server.received[1]
+	if hb2.MessageCount != 1 {
+		t.Errorf("poll 2 heartbeat: MessageCount = %d, want 1 (bug #4 would give 0)", hb2.MessageCount)
+	}
+	if hb2.Model != "between-polls" {
+		t.Errorf("poll 2 heartbeat: Model = %q, want %q", hb2.Model, "between-polls")
+	}
+	if hb2.InputTokens != 200 || hb2.OutputTokens != 100 {
+		t.Errorf("poll 2 heartbeat: tokens = (%d,%d), want (200,100)", hb2.InputTokens, hb2.OutputTokens)
+	}
+}
+
+// TestPoll_CursorRoundtripThroughDisk_TapesFormat is the two-poll scenario
+// PLUS the cursor actually being saved to and loaded from disk between
+// polls — exactly what clawtel does in production. The cursor file is
+// RFC3339Nano; the rows are tapes-format; the fix must bridge them.
+func TestPoll_CursorRoundtripThroughDisk_TapesFormat(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	server := newCapturingServer(t)
+	defer server.Close()
+
+	cursorPath := filepath.Join(t.TempDir(), "cursor")
+
+	now := time.Now().UTC()
+	insertRowTapesFormat(t, db, now.Add(-45*time.Minute), "first-window", 10, 5)
+
+	// Poll 1 with on-disk cursor round-trip.
+	cursor, err := loadCursor(cursorPath)
+	if err != nil {
+		t.Fatalf("loadCursor (first run): %v", err)
+	}
+	// First-run cursor is "now" so back-date to see existing rows.
+	cursor = now.Add(-time.Hour)
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if err := saveCursor(cursorPath, newCursor); err != nil {
+		t.Fatalf("saveCursor: %v", err)
+	}
+
+	// Verify the on-disk format is RFC3339Nano (the "T"/"Z" form that was
+	// causing the bug). If someone ever changes saveCursor, this assertion
+	// catches the drift and forces a re-evaluation of this test.
+	cursorBytes, err := os.ReadFile(cursorPath)
+	if err != nil {
+		t.Fatalf("read cursor file: %v", err)
+	}
+	cursorStr := string(cursorBytes)
+	if !bytes.ContainsAny(cursorBytes, "T") || !bytes.HasSuffix(cursorBytes, []byte("Z")) {
+		t.Fatalf("cursor on disk = %q, want RFC3339Nano (T…Z) form", cursorStr)
+	}
+
+	// New row after the cursor, in tapes' on-disk format.
+	insertRowTapesFormat(t, db, newCursor.Add(time.Minute), "second-window", 20, 10)
+
+	// Poll 2 loads the cursor from disk (RFC3339Nano) and must see the row.
+	loadedCursor, err := loadCursor(cursorPath)
+	if err != nil {
+		t.Fatalf("loadCursor (second run): %v", err)
+	}
+	_, _, err = pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", loadedCursor, nil, "")
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if len(server.received) != 2 {
+		t.Fatalf("got %d heartbeats, want 2", len(server.received))
+	}
+	if server.received[1].MessageCount != 1 {
+		t.Errorf("poll 2 MessageCount = %d, want 1", server.received[1].MessageCount)
+	}
+	if server.received[1].Model != "second-window" {
+		t.Errorf("poll 2 Model = %q, want %q", server.received[1].Model, "second-window")
+	}
+}
+
+// TestReadRows_CurrentTimestampKeyword uses the literal SQL CURRENT_TIMESTAMP
+// keyword from the issue suggestion. SQLite's CURRENT_TIMESTAMP produces
+// "YYYY-MM-DD HH:MM:SS" — no fractional seconds, no timezone suffix.
+// The row must be visible AND the scan-side parser must accept the format.
+func TestReadRows_CurrentTimestampKeyword(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	_, err := db.Exec(`INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens)
+		VALUES (CURRENT_TIMESTAMP, 'ct-model', 77, 33)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cursor from 1 hour ago — the just-inserted row must be visible.
+	cursor := time.Now().UTC().Add(-time.Hour)
+	rows, err := readRows(db, cursor)
+	if err != nil {
+		t.Fatalf("readRows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (CURRENT_TIMESTAMP row should be visible)", len(rows))
+	}
+	if rows[0].model != "ct-model" {
+		t.Errorf("model = %q, want %q", rows[0].model, "ct-model")
+	}
+	if rows[0].promptTokens != 77 || rows[0].completionTokens != 33 {
+		t.Errorf("tokens = (%d,%d), want (77,33)", rows[0].promptTokens, rows[0].completionTokens)
+	}
+}
+
+// TestParseCreatedAt_CurrentTimestampFormat asserts the parser handles the
+// raw output of SQLite's CURRENT_TIMESTAMP (UTC, no fractional, no TZ).
+func TestParseCreatedAt_CurrentTimestampFormat(t *testing.T) {
+	got, err := parseCreatedAt("2026-04-13 20:08:23")
+	if err != nil {
+		t.Fatalf("parseCreatedAt: %v", err)
+	}
+	if got.Year() != 2026 || got.Month() != 4 || got.Day() != 13 {
+		t.Errorf("date = %v, want 2026-04-13", got)
+	}
+	if got.Hour() != 20 || got.Minute() != 8 || got.Second() != 23 {
+		t.Errorf("time = %v, want 20:08:23", got)
+	}
+	// CURRENT_TIMESTAMP is always UTC per SQLite docs.
+	if got.Location() != time.UTC {
+		t.Errorf("location = %v, want UTC", got.Location())
 	}
 }
 

@@ -216,6 +216,11 @@ func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string,
 
 // readRows queries ONLY these four columns from the nodes table.
 // This is the complete read surface.
+//
+// Both sides of the timestamp comparison are wrapped in SQLite's datetime()
+// so tapes' on-disk format (space separator, numeric offset) and clawtel's
+// RFC3339Nano cursor compare correctly regardless of textual representation.
+// See issue #4 for the silent-zero-rows bug this prevents.
 func readRows(db *sql.DB, since time.Time) ([]row, error) {
 	const query = `
 		SELECT
@@ -224,8 +229,8 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 			prompt_tokens,
 			completion_tokens
 		FROM nodes
-		WHERE created_at > ?
-		ORDER BY created_at ASC
+		WHERE datetime(created_at) > datetime(?)
+		ORDER BY datetime(created_at) ASC
 	`
 
 	sqlRows, err := db.Query(query, since.UTC().Format(time.RFC3339Nano))
@@ -241,13 +246,44 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 		if err := sqlRows.Scan(&createdAtStr, &r.model, &r.promptTokens, &r.completionTokens); err != nil {
 			return nil, err
 		}
-		r.createdAt, err = time.Parse(time.RFC3339Nano, createdAtStr)
+		r.createdAt, err = parseCreatedAt(createdAtStr)
 		if err != nil {
 			return nil, fmt.Errorf("parse created_at: %v", err)
 		}
 		out = append(out, r)
 	}
 	return out, sqlRows.Err()
+}
+
+// parseCreatedAt accepts the three timestamp shapes clawtel can encounter:
+//
+//  1. RFC3339Nano ("T" separator, Z or numeric offset) — clawtel's own
+//     cursor file format, and anything that round-trips through Go.
+//  2. "YYYY-MM-DD HH:MM:SS[.fff][±HH:MM]" — tapes' on-disk format.
+//     The ".fff" and offset are both optional during parsing.
+//  3. "YYYY-MM-DD HH:MM:SS" — SQLite's plain CURRENT_TIMESTAMP output,
+//     always UTC per SQLite docs.
+//
+// Go's time.Parse accepts a missing fractional even when the layout
+// contains one, so a single layout covers both fractional and no-fractional
+// inputs for each separator/offset combination.
+func parseCreatedAt(s string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+	}
+	var firstErr error
+	for _, layout := range layouts {
+		t, err := time.Parse(layout, s)
+		if err == nil {
+			return t, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return time.Time{}, firstErr
 }
 
 // aggregate builds the heartbeat payload from raw rows.
