@@ -255,16 +255,23 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 	return out, sqlRows.Err()
 }
 
-// parseCreatedAt accepts both RFC3339Nano (T/Z) and SQLite's default
-// CURRENT_TIMESTAMP format (space separator, numeric offset). Tapes writes
-// the latter; clawtel has historically written the former to the cursor file.
+// parseCreatedAt accepts the three timestamp shapes clawtel can encounter:
+//
+//  1. RFC3339Nano ("T" separator, Z or numeric offset) — clawtel's own
+//     cursor file format, and anything that round-trips through Go.
+//  2. "YYYY-MM-DD HH:MM:SS[.fff][±HH:MM]" — tapes' on-disk format.
+//     The ".fff" and offset are both optional during parsing.
+//  3. "YYYY-MM-DD HH:MM:SS" — SQLite's plain CURRENT_TIMESTAMP output,
+//     always UTC per SQLite docs.
+//
+// Go's time.Parse accepts a missing fractional even when the layout
+// contains one, so a single layout covers both fractional and no-fractional
+// inputs for each separator/offset combination.
 func parseCreatedAt(s string) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339Nano,
 		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05-07:00",
-		"2006-01-02 15:04:05.999999999Z07:00",
-		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
 	}
 	var firstErr error
 	for _, layout := range layouts {
