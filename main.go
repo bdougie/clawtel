@@ -27,7 +27,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -536,4 +538,16 @@ func loadSkills(paths []string) []skill {
 		maps = append(maps, m)
 	}
 	return dedupeSkills(maps)
+}
+
+// hashSkills returns a stable sha256 hex digest of the skills list.
+// Sorts defensively so callers cannot break the stability contract.
+// Used to detect whether the skills set changed since the last sent heartbeat.
+func hashSkills(skills []skill) string {
+	cp := make([]skill, len(skills))
+	copy(cp, skills)
+	sort.Slice(cp, func(i, j int) bool { return cp[i].Slug < cp[j].Slug })
+	data, _ := json.Marshal(cp)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

@@ -993,3 +993,48 @@ func TestLoadSkills_AllInvalid(t *testing.T) {
 		t.Errorf("got %d skills, want 0 (all invalid)", len(got))
 	}
 }
+
+// --- hashSkills tests ---
+
+func TestHashSkills_Stable(t *testing.T) {
+	a := []skill{{Slug: "granola", Version: "1.0.0"}, {Slug: "tapes", Version: "0.1.0"}}
+	b := []skill{{Slug: "granola", Version: "1.0.0"}, {Slug: "tapes", Version: "0.1.0"}}
+	if hashSkills(a) != hashSkills(b) {
+		t.Error("identical input should produce identical hash")
+	}
+}
+
+func TestHashSkills_Empty(t *testing.T) {
+	h1 := hashSkills(nil)
+	h2 := hashSkills([]skill{})
+	if h1 != h2 {
+		t.Errorf("nil and empty slice should hash equal; got %q vs %q", h1, h2)
+	}
+	if h1 == "" {
+		t.Error("hash should not be empty string")
+	}
+}
+
+func TestHashSkills_DiffersOnVersionChange(t *testing.T) {
+	a := []skill{{Slug: "granola", Version: "1.0.0"}}
+	b := []skill{{Slug: "granola", Version: "1.0.1"}}
+	if hashSkills(a) == hashSkills(b) {
+		t.Error("different versions should hash differently")
+	}
+}
+
+func TestHashSkills_DiffersOnSlugChange(t *testing.T) {
+	a := []skill{{Slug: "granola", Version: "1.0.0"}}
+	b := []skill{{Slug: "tapes", Version: "1.0.0"}}
+	if hashSkills(a) == hashSkills(b) {
+		t.Error("different slugs should hash differently")
+	}
+}
+
+func TestHashSkills_OrderInsensitive(t *testing.T) {
+	a := []skill{{Slug: "a", Version: "1"}, {Slug: "b", Version: "2"}}
+	b := []skill{{Slug: "b", Version: "2"}, {Slug: "a", Version: "1"}}
+	if hashSkills(a) != hashSkills(b) {
+		t.Error("hash should be order-insensitive")
+	}
+}
