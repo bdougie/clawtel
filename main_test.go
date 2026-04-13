@@ -818,3 +818,37 @@ func TestParseLockFile_IgnoresInstalledAt(t *testing.T) {
 		}
 	}
 }
+
+// --- compareSemver tests ---
+
+func TestCompareSemver(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.0.0", "1.0.0", 0},
+		{"1.0.0", "1.0.1", -1},
+		{"1.0.1", "1.0.0", 1},
+		{"1.2.0", "1.10.0", -1},
+		{"2.0.0", "1.99.99", 1},
+		{"1.0", "1.0.0", 0},
+		{"1", "1.0.0", 0},
+		{"1.0.0", "1.0", 0},
+		{"", "1.0.0", -1},
+		{"1.0.0", "", 1},
+		{"", "", 0},
+	}
+	for _, c := range cases {
+		got := compareSemver(c.a, c.b)
+		if got != c.want {
+			t.Errorf("compareSemver(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestCompareSemver_NonNumeric(t *testing.T) {
+	got := compareSemver("1.0.0-beta", "1.0.0-alpha")
+	if got == 0 {
+		t.Error("compareSemver should distinguish 1.0.0-beta from 1.0.0-alpha")
+	}
+}

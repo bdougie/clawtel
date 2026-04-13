@@ -35,6 +35,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -439,4 +441,53 @@ func parseLockFile(path string) (map[string]string, error) {
 		out[slug] = entry.Version
 	}
 	return out, nil
+}
+
+// compareSemver returns -1 if a<b, 0 if a==b, 1 if a>b.
+// Compares dotted components numerically when possible, lexically otherwise.
+// Missing trailing components are treated as 0 ("1.0" == "1.0.0").
+func compareSemver(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a == "" {
+		return -1
+	}
+	if b == "" {
+		return 1
+	}
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	n := len(aParts)
+	if len(bParts) > n {
+		n = len(bParts)
+	}
+	for i := 0; i < n; i++ {
+		ap := "0"
+		bp := "0"
+		if i < len(aParts) {
+			ap = aParts[i]
+		}
+		if i < len(bParts) {
+			bp = bParts[i]
+		}
+		ai, aErr := strconv.Atoi(ap)
+		bi, bErr := strconv.Atoi(bp)
+		if aErr == nil && bErr == nil {
+			if ai != bi {
+				if ai < bi {
+					return -1
+				}
+				return 1
+			}
+			continue
+		}
+		if ap != bp {
+			if ap < bp {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
