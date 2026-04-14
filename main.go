@@ -252,9 +252,18 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 	for sqlRows.Next() {
 		var r row
 		var createdAtStr string
-		if err := sqlRows.Scan(&createdAtStr, &r.model, &r.promptTokens, &r.completionTokens); err != nil {
+		// prompt_tokens and completion_tokens are nullable in tapes: partial
+		// request rows and mid-stream delta rows carry NULL until the turn
+		// completes. Scanning into sql.NullInt64 lets a single NULL row live
+		// in the window without poisoning the whole scan. NULL coerces to 0
+		// so the row still contributes its message_count to the heartbeat.
+		// See issue #8.
+		var pt, ct sql.NullInt64
+		if err := sqlRows.Scan(&createdAtStr, &r.model, &pt, &ct); err != nil {
 			return nil, err
 		}
+		r.promptTokens = pt.Int64
+		r.completionTokens = ct.Int64
 		r.createdAt, err = parseCreatedAt(createdAtStr)
 		if err != nil {
 			return nil, fmt.Errorf("parse created_at: %v", err)
