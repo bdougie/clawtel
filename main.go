@@ -182,6 +182,14 @@ func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time
 }
 
 // pollWithURL is the testable version of poll that accepts a custom endpoint URL.
+//
+// One heartbeat is sent per model present in the window (see aggregate).
+// Skills are attached to the first heartbeat only so the server sees the
+// current skill set exactly once per poll, not once per model.
+//
+// On send failure the loop stops immediately, returning the original cursor
+// and skills hash. The next poll will re-read rows since the cursor and
+// retry the whole window — no partial progress is persisted.
 func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
 	windowStart := cursor
 	windowEnd := time.Now().UTC()
@@ -191,24 +199,25 @@ func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string,
 		return cursor, lastSkillsHash, fmt.Errorf("read: %v", err)
 	}
 
-	hb := aggregate(clawID, windowStart, windowEnd, rows)
+	hbs := aggregate(clawID, windowStart, windowEnd, rows)
 
 	skills := loadSkills(lockPaths)
 	newHash := hashSkills(skills)
-	if newHash != lastSkillsHash {
-		hb.ClawhubSkills = skills
+	if newHash != lastSkillsHash && len(hbs) > 0 {
+		hbs[0].ClawhubSkills = skills
 	}
 
-	if err := sendToURL(client, url, ingestKey, hb); err != nil {
-		return cursor, lastSkillsHash, fmt.Errorf("send: %v", err)
-	}
-
-	if len(rows) > 0 {
-		log.Printf("sent: %d turns, %d in, %d out, model=%s",
-			hb.MessageCount, hb.InputTokens, hb.OutputTokens, hb.Model)
-	}
-	if len(hb.ClawhubSkills) > 0 {
-		log.Printf("sent: %d clawhub skills (hash changed)", len(hb.ClawhubSkills))
+	for _, hb := range hbs {
+		if err := sendToURL(client, url, ingestKey, hb); err != nil {
+			return cursor, lastSkillsHash, fmt.Errorf("send: %v", err)
+		}
+		if hb.MessageCount > 0 {
+			log.Printf("sent: %d turns, %d in, %d out, model=%s",
+				hb.MessageCount, hb.InputTokens, hb.OutputTokens, hb.Model)
+		}
+		if len(hb.ClawhubSkills) > 0 {
+			log.Printf("sent: %d clawhub skills (hash changed)", len(hb.ClawhubSkills))
+		}
 	}
 
 	return windowEnd, newHash, nil
@@ -286,37 +295,51 @@ func parseCreatedAt(s string) (time.Time, error) {
 	return time.Time{}, firstErr
 }
 
-// aggregate builds the heartbeat payload from raw rows.
-// MessageCount is the number of API turns (nodes) in the window, not chat messages.
-// Model is the most-used model in the window.
-func aggregate(clawID string, start, end time.Time, rows []row) heartbeat {
-	var totalIn, totalOut int64
-	modelCounts := map[string]int64{}
+// aggregate builds one heartbeat per model in the window.
+// MessageCount is the number of API turns (nodes) attributed to that model.
+//
+// Returns heartbeats sorted by Model so the loop order is deterministic
+// (skills are attached to the first one). When rows is empty a single
+// presence-ping heartbeat with empty Model and zero tokens is returned,
+// so claw.tech can distinguish "online but idle" from "offline".
+//
+// Before issue #7 this function collapsed all rows in a window into a single
+// heartbeat labeled with whichever model had the most rows. Multi-model claws
+// (e.g. opus for chat + haiku for heartbeat + sonnet for cron) showed up as
+// single-model on the leaderboard. Splitting by model preserves per-model
+// token counts and makes the model-distribution chart correct.
+func aggregate(clawID string, start, end time.Time, rows []row) []heartbeat {
+	if len(rows) == 0 {
+		return []heartbeat{{
+			ClawID:      clawID,
+			WindowStart: start,
+			WindowEnd:   end,
+		}}
+	}
 
+	buckets := map[string]*heartbeat{}
 	for _, r := range rows {
-		totalIn += r.promptTokens
-		totalOut += r.completionTokens
-		modelCounts[r.model]++
-	}
-
-	dominantModel := ""
-	var maxCount int64
-	for m, c := range modelCounts {
-		if c > maxCount {
-			dominantModel = m
-			maxCount = c
+		hb, ok := buckets[r.model]
+		if !ok {
+			hb = &heartbeat{
+				ClawID:      clawID,
+				WindowStart: start,
+				WindowEnd:   end,
+				Model:       r.model,
+			}
+			buckets[r.model] = hb
 		}
+		hb.InputTokens += r.promptTokens
+		hb.OutputTokens += r.completionTokens
+		hb.MessageCount++
 	}
 
-	return heartbeat{
-		ClawID:       clawID,
-		WindowStart:  start,
-		WindowEnd:    end,
-		Model:        dominantModel,
-		InputTokens:  totalIn,
-		OutputTokens: totalOut,
-		MessageCount: int64(len(rows)),
+	out := make([]heartbeat, 0, len(buckets))
+	for _, hb := range buckets {
+		out = append(out, *hb)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
 }
 
 // send posts the heartbeat to claw.tech.
