@@ -101,8 +101,12 @@ func TestAggregate_EmptyRows(t *testing.T) {
 	start := time.Now().UTC()
 	end := start.Add(time.Minute)
 
-	hb := aggregate("test-claw", start, end, nil)
+	hbs := aggregate("test-claw", start, end, nil)
 
+	if len(hbs) != 1 {
+		t.Fatalf("len(hbs) = %d, want 1 (presence ping)", len(hbs))
+	}
+	hb := hbs[0]
 	if hb.ClawID != "test-claw" {
 		t.Errorf("ClawID = %q, want %q", hb.ClawID, "test-claw")
 	}
@@ -127,8 +131,12 @@ func TestAggregate_SingleRow(t *testing.T) {
 		{createdAt: start, model: "claude-opus-4-6", promptTokens: 1000, completionTokens: 500},
 	}
 
-	hb := aggregate("my-claw", start, end, rows)
+	hbs := aggregate("my-claw", start, end, rows)
 
+	if len(hbs) != 1 {
+		t.Fatalf("len(hbs) = %d, want 1", len(hbs))
+	}
+	hb := hbs[0]
 	if hb.InputTokens != 1000 {
 		t.Errorf("InputTokens = %d, want 1000", hb.InputTokens)
 	}
@@ -143,42 +151,119 @@ func TestAggregate_SingleRow(t *testing.T) {
 	}
 }
 
-func TestAggregate_MultipleRows_DominantModel(t *testing.T) {
+func TestAggregate_MultipleModels_OneHeartbeatPerModel(t *testing.T) {
+	start := time.Now().UTC()
+	end := start.Add(time.Minute)
+	// Matches the issue #7 repro: haiku has the most rows (dominant under
+	// the old behavior) but holds the fewest tokens. Each model must keep
+	// its own token counts instead of being folded into one dominant bucket.
+	rows := []row{
+		{model: "claude-opus-4-6", promptTokens: 80_000, completionTokens: 40_000},
+		{model: "claude-opus-4-6", promptTokens: 0, completionTokens: 0},
+		{model: "claude-sonnet-4-6", promptTokens: 10_000, completionTokens: 5_000},
+		{model: "claude-sonnet-4-6", promptTokens: 0, completionTokens: 0},
+		{model: "claude-haiku-4-5", promptTokens: 250, completionTokens: 250},
+		{model: "claude-haiku-4-5", promptTokens: 250, completionTokens: 250},
+		{model: "claude-haiku-4-5", promptTokens: 250, completionTokens: 250},
+		{model: "claude-haiku-4-5", promptTokens: 250, completionTokens: 250},
+	}
+
+	hbs := aggregate("claw", start, end, rows)
+
+	if len(hbs) != 3 {
+		t.Fatalf("len(hbs) = %d, want 3 (one per model)", len(hbs))
+	}
+
+	byModel := map[string]heartbeat{}
+	for _, hb := range hbs {
+		byModel[hb.Model] = hb
+	}
+
+	opus, ok := byModel["claude-opus-4-6"]
+	if !ok {
+		t.Fatal("missing claude-opus-4-6 heartbeat")
+	}
+	if opus.InputTokens != 80_000 || opus.OutputTokens != 40_000 || opus.MessageCount != 2 {
+		t.Errorf("opus: in=%d out=%d count=%d; want 80000/40000/2",
+			opus.InputTokens, opus.OutputTokens, opus.MessageCount)
+	}
+
+	sonnet, ok := byModel["claude-sonnet-4-6"]
+	if !ok {
+		t.Fatal("missing claude-sonnet-4-6 heartbeat")
+	}
+	if sonnet.InputTokens != 10_000 || sonnet.OutputTokens != 5_000 || sonnet.MessageCount != 2 {
+		t.Errorf("sonnet: in=%d out=%d count=%d; want 10000/5000/2",
+			sonnet.InputTokens, sonnet.OutputTokens, sonnet.MessageCount)
+	}
+
+	haiku, ok := byModel["claude-haiku-4-5"]
+	if !ok {
+		t.Fatal("missing claude-haiku-4-5 heartbeat")
+	}
+	if haiku.InputTokens != 1_000 || haiku.OutputTokens != 1_000 || haiku.MessageCount != 4 {
+		t.Errorf("haiku: in=%d out=%d count=%d; want 1000/1000/4",
+			haiku.InputTokens, haiku.OutputTokens, haiku.MessageCount)
+	}
+}
+
+func TestAggregate_SortedByModel(t *testing.T) {
 	start := time.Now().UTC()
 	end := start.Add(time.Minute)
 	rows := []row{
-		{model: "claude-opus-4-6", promptTokens: 100, completionTokens: 50},
-		{model: "claude-sonnet-4-6", promptTokens: 200, completionTokens: 100},
-		{model: "claude-opus-4-6", promptTokens: 300, completionTokens: 150},
+		{model: "zzz", promptTokens: 1, completionTokens: 1},
+		{model: "aaa", promptTokens: 1, completionTokens: 1},
+		{model: "mmm", promptTokens: 1, completionTokens: 1},
 	}
 
-	hb := aggregate("claw", start, end, rows)
+	hbs := aggregate("claw", start, end, rows)
 
-	if hb.InputTokens != 600 {
-		t.Errorf("InputTokens = %d, want 600", hb.InputTokens)
+	if len(hbs) != 3 {
+		t.Fatalf("len(hbs) = %d, want 3", len(hbs))
 	}
-	if hb.OutputTokens != 300 {
-		t.Errorf("OutputTokens = %d, want 300", hb.OutputTokens)
-	}
-	if hb.MessageCount != 3 {
-		t.Errorf("MessageCount = %d, want 3", hb.MessageCount)
-	}
-	if hb.Model != "claude-opus-4-6" {
-		t.Errorf("Model = %q, want %q (dominant)", hb.Model, "claude-opus-4-6")
+	want := []string{"aaa", "mmm", "zzz"}
+	for i, hb := range hbs {
+		if hb.Model != want[i] {
+			t.Errorf("hbs[%d].Model = %q, want %q", i, hb.Model, want[i])
+		}
 	}
 }
 
 func TestAggregate_PreservesWindowTimes(t *testing.T) {
 	start := time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 3, 30, 13, 0, 0, 0, time.UTC)
-
-	hb := aggregate("claw", start, end, nil)
-
-	if !hb.WindowStart.Equal(start) {
-		t.Errorf("WindowStart = %v, want %v", hb.WindowStart, start)
+	rows := []row{
+		{model: "a", promptTokens: 1, completionTokens: 1},
+		{model: "b", promptTokens: 1, completionTokens: 1},
 	}
-	if !hb.WindowEnd.Equal(end) {
-		t.Errorf("WindowEnd = %v, want %v", hb.WindowEnd, end)
+
+	hbs := aggregate("claw", start, end, rows)
+	if len(hbs) != 2 {
+		t.Fatalf("len(hbs) = %d, want 2", len(hbs))
+	}
+	for _, hb := range hbs {
+		if !hb.WindowStart.Equal(start) {
+			t.Errorf("WindowStart = %v, want %v", hb.WindowStart, start)
+		}
+		if !hb.WindowEnd.Equal(end) {
+			t.Errorf("WindowEnd = %v, want %v", hb.WindowEnd, end)
+		}
+	}
+}
+
+func TestAggregate_ClawIDSetOnEveryBucket(t *testing.T) {
+	start := time.Now().UTC()
+	end := start.Add(time.Minute)
+	rows := []row{
+		{model: "a", promptTokens: 1, completionTokens: 1},
+		{model: "b", promptTokens: 1, completionTokens: 1},
+	}
+
+	hbs := aggregate("my-claw", start, end, rows)
+	for _, hb := range hbs {
+		if hb.ClawID != "my-claw" {
+			t.Errorf("ClawID = %q, want %q", hb.ClawID, "my-claw")
+		}
 	}
 }
 
@@ -463,6 +548,114 @@ func TestPoll_EmptyDB(t *testing.T) {
 	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPoll_SendsOneHeartbeatPerModel(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	insertRow(t, db, now.Add(-3*time.Minute), "claude-opus-4-6", 80_000, 40_000)
+	insertRow(t, db, now.Add(-2*time.Minute), "claude-sonnet-4-6", 10_000, 5_000)
+	insertRow(t, db, now.Add(-time.Minute), "claude-haiku-4-5", 1_000, 1_000)
+
+	var received []heartbeat
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var hb heartbeat
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &hb); err != nil {
+			t.Errorf("unmarshal: %v", err)
+		}
+		received = append(received, hb)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	cursor := now.Add(-time.Hour)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(received) != 3 {
+		t.Fatalf("received %d heartbeats, want 3 (one per model)", len(received))
+	}
+
+	seen := map[string]heartbeat{}
+	for _, hb := range received {
+		seen[hb.Model] = hb
+	}
+	if seen["claude-opus-4-6"].InputTokens != 80_000 {
+		t.Errorf("opus input tokens = %d, want 80000", seen["claude-opus-4-6"].InputTokens)
+	}
+	if seen["claude-sonnet-4-6"].InputTokens != 10_000 {
+		t.Errorf("sonnet input tokens = %d, want 10000", seen["claude-sonnet-4-6"].InputTokens)
+	}
+	if seen["claude-haiku-4-5"].InputTokens != 1_000 {
+		t.Errorf("haiku input tokens = %d, want 1000", seen["claude-haiku-4-5"].InputTokens)
+	}
+}
+
+func TestPoll_ClawhubSkillsOnlyOnFirstHeartbeat(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	insertRow(t, db, now.Add(-2*time.Minute), "claude-opus-4-6", 100, 50)
+	insertRow(t, db, now.Add(-time.Minute), "claude-sonnet-4-6", 200, 100)
+
+	var received []heartbeat
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var hb heartbeat
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &hb)
+		received = append(received, hb)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	valid, _, _, _ := lockFixtures(t)
+	cursor := now.Add(-time.Hour)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, []string{valid}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(received) != 2 {
+		t.Fatalf("received %d heartbeats, want 2", len(received))
+	}
+	// Heartbeats are sorted by Model, so claude-opus-4-6 (first alphabetically) gets the skills.
+	if len(received[0].ClawhubSkills) == 0 {
+		t.Error("first heartbeat should carry clawhub_skills")
+	}
+	if len(received[1].ClawhubSkills) != 0 {
+		t.Errorf("second heartbeat should omit clawhub_skills, got %d", len(received[1].ClawhubSkills))
+	}
+}
+
+func TestPoll_StopsOnFirstSendError(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	insertRow(t, db, now.Add(-2*time.Minute), "claude-opus-4-6", 100, 50)
+	insertRow(t, db, now.Add(-time.Minute), "claude-sonnet-4-6", 200, 100)
+
+	var count int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	cursor := now.Add(-time.Hour)
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	if err == nil {
+		t.Fatal("expected error from send failure, got nil")
+	}
+	if count != 1 {
+		t.Errorf("sent %d heartbeats, want 1 (stop on first error)", count)
 	}
 }
 

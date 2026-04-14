@@ -14,8 +14,8 @@ tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/
 ```
 
 - **Read side:** 4 columns from `nodes`: `created_at`, `model`, `prompt_tokens`, `completion_tokens`
-- **Send side:** aggregated heartbeat: `claw_id`, `window_start`, `window_end`, `model`, `input_tokens`, `output_tokens`, `message_count`
-- **Polling:** every 60 minutes, sends even when idle (presence ping)
+- **Send side:** one heartbeat per distinct model in the window. Each heartbeat carries `claw_id`, `window_start`, `window_end`, `model`, `input_tokens`, `output_tokens`, `message_count`. Skills are attached to the first heartbeat only.
+- **Polling:** every 60 minutes. Idle windows still send one presence-ping heartbeat with empty model and zero tokens.
 - **Cursor:** timestamp file next to the DB tracks last-seen row
 
 When `CLAWTEL_CLAWHUB_LOCKS` is set, clawtel also reads `.clawhub/lock.json` files at the configured paths and adds an optional `clawhub_skills` array (slug + version only) to the heartbeat. The field is omitted when unchanged since the last successful send.
