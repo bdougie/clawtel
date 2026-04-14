@@ -46,6 +46,37 @@ tapes start          # starts proxy + API, writes to ~/.tapes/tapes.sqlite
 
 For the Anthropic Node/Python SDK, `ANTHROPIC_BASE_URL` (or passing `baseURL` to the client constructor) is enough — no code changes. For Claude Code, set it before launching the CLI.
 
+### OpenClaw users: `ANTHROPIC_BASE_URL` alone is not enough
+
+If your workload is an OpenClaw agent (clawchief, staffchief, openclaw-in-a-box), the env var is silently ignored. OpenClaw instantiates its Anthropic client with `baseURL: model.baseUrl`, which clobbers the SDK's normal `readEnv("ANTHROPIC_BASE_URL")` fallback. You'll see heartbeats sending with `model=""`, `input_tokens=0`, `output_tokens=0` forever, and the gateway process will hold a direct TLS connection to Anthropic's edge instead of `127.0.0.1:8080`.
+
+Fix: set the provider's base URL explicitly in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "models": {
+    "providers": {
+      "anthropic": {
+        "baseUrl": "http://localhost:8080",
+        "models": [
+          { "id": "claude-opus-4-6",   "name": "Claude Opus 4.6"   },
+          { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6" },
+          { "id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"  }
+        ]
+      }
+    }
+  }
+}
+```
+
+Then restart the OpenClaw gateway. Verify the gateway is routing through tapes:
+
+```bash
+ss -tnp | awk -v pid="$(pgrep -f openclaw-gateway | head -1)" '$0 ~ "pid="pid'
+# Expect a line with Peer Address  127.0.0.1:8080
+# If instead you see Peer Address 160.79.*.* or a Cloudflare IP, tapes is still being bypassed.
+```
+
 Confirm tapes is capturing rows:
 
 ```bash
@@ -53,7 +84,7 @@ sqlite3 ~/.tapes/tapes.sqlite \
   'SELECT count(*), max(created_at) FROM nodes;'
 ```
 
-If the count is zero after making a call, tapes isn't in the request path — recheck `ANTHROPIC_BASE_URL` in the process actually running the agent.
+If the count is zero after making a call, tapes isn't in the request path — recheck `ANTHROPIC_BASE_URL` in the process actually running the agent (and for OpenClaw, the `models.providers.anthropic.baseUrl` config above).
 
 ## Step 2 — install clawtel
 
@@ -164,10 +195,12 @@ On the same machine as an agent like clawchief/staffchief, `TAPES_DB` should poi
 |---|---|---|
 | clawtel exits silently on start | `CLAW_INGEST_KEY` not exported in this shell/service | Check `systemctl show clawtel -p Environment` or `env \| grep CLAW_` |
 | `assertSchema failed` on startup | tapes.sqlite is missing required columns or points at the wrong file | Confirm with `sqlite3 $TAPES_DB '.schema nodes'` that `created_at, model, prompt_tokens, completion_tokens` all exist |
-| Heartbeats send but all zeros | tapes isn't proxying Anthropic calls — agent is talking directly to `api.anthropic.com` | Verify `ANTHROPIC_BASE_URL` in the agent process environment; re-check `SELECT count(*) FROM nodes` |
+| Heartbeats send but all zeros, agent is an OpenClaw gateway | `ANTHROPIC_BASE_URL` is set but OpenClaw overrides it with `model.baseUrl` (unset) | Set `models.providers.anthropic.baseUrl = "http://localhost:8080"` in `~/.openclaw/openclaw.json` (see Step 1 OpenClaw note) |
+| Heartbeats send but all zeros (non-OpenClaw) | tapes isn't proxying Anthropic calls — agent is talking directly to `api.anthropic.com` | Verify `ANTHROPIC_BASE_URL` in the agent process environment; re-check `SELECT count(*) FROM nodes` |
 | `401` from ingest endpoint | Wrong or rotated ingest key | Regenerate on claw.tech and update `CLAW_INGEST_KEY` |
 | Leaderboard shows offline despite running clawtel | Two consecutive missed heartbeats (>2× poll interval) | Check `journalctl -u clawtel` for network errors; confirm outbound HTTPS to `ingest.claw.tech` works |
 | Cursor seems stuck | `~/.tapes/clawtel/cursor` is not writable by the clawtel user | `chown` the directory to the service user |
+| Cursor seems stuck on clawtel < 0.1.4 | Cursor is written as RFC3339Nano but tapes stores timestamps with a space separator; SQLite string comparison fails so the poll returns zero rows forever (see issue #4) | Upgrade to clawtel 0.1.4+ |
 
 ## Security footprint (tell the user)
 
