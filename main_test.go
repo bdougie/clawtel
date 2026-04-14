@@ -32,11 +32,14 @@ func createTestDB(t *testing.T, sensitive bool) *sql.DB {
 		extra = ", content TEXT, bucket TEXT, project TEXT, agent_name TEXT"
 	}
 
+	// NOTE: prompt_tokens and completion_tokens are nullable to match the
+	// real tapes schema. Tapes writes NULL for partial/streaming rows
+	// (request headers, mid-stream deltas). See issue #8.
 	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE nodes (
 		created_at TEXT NOT NULL,
 		model TEXT NOT NULL,
-		prompt_tokens INTEGER NOT NULL DEFAULT 0,
-		completion_tokens INTEGER NOT NULL DEFAULT 0
+		prompt_tokens INTEGER,
+		completion_tokens INTEGER
 		%s
 	)`, extra))
 	if err != nil {
@@ -331,6 +334,118 @@ func TestReadRows_OrderedByCreatedAt(t *testing.T) {
 	}
 	if rows[2].model != "third" {
 		t.Errorf("rows[2].model = %q, want %q", rows[2].model, "third")
+	}
+}
+
+// insertRowRaw inserts a row using raw ?-placeholders so callers can pass
+// nil for NULL token columns. Matches the shape tapes writes for partial /
+// streaming rows: a created_at + model, but prompt_tokens/completion_tokens
+// may be SQL NULL.
+func insertRowRaw(t *testing.T, db *sql.DB, createdAt time.Time, model string, promptTokens, completionTokens any) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?)`,
+		createdAt.UTC().Format(time.RFC3339Nano), model, promptTokens, completionTokens,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadRows_NullPromptTokens(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	insertRowRaw(t, db, now.Add(-time.Minute), "claude-opus-4-6", nil, int64(50))
+
+	rows, err := readRows(db, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("readRows errored on NULL prompt_tokens: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].promptTokens != 0 {
+		t.Errorf("promptTokens = %d, want 0 (NULL coerced)", rows[0].promptTokens)
+	}
+	if rows[0].completionTokens != 50 {
+		t.Errorf("completionTokens = %d, want 50", rows[0].completionTokens)
+	}
+}
+
+func TestReadRows_NullCompletionTokens(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	insertRowRaw(t, db, now.Add(-time.Minute), "claude-opus-4-6", int64(100), nil)
+
+	rows, err := readRows(db, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("readRows errored on NULL completion_tokens: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].promptTokens != 100 {
+		t.Errorf("promptTokens = %d, want 100", rows[0].promptTokens)
+	}
+	if rows[0].completionTokens != 0 {
+		t.Errorf("completionTokens = %d, want 0 (NULL coerced)", rows[0].completionTokens)
+	}
+}
+
+func TestReadRows_NullBothTokens(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	insertRowRaw(t, db, now.Add(-time.Minute), "claude-opus-4-6", nil, nil)
+
+	rows, err := readRows(db, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("readRows errored on NULL tokens: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].promptTokens != 0 || rows[0].completionTokens != 0 {
+		t.Errorf("tokens = %d/%d, want 0/0", rows[0].promptTokens, rows[0].completionTokens)
+	}
+}
+
+// TestReadRows_NullRowDoesNotPoisonScan is the issue #8 repro: one NULL row
+// must not prevent the surrounding completed rows from being returned.
+func TestReadRows_NullRowDoesNotPoisonScan(t *testing.T) {
+	db := createTestDB(t, false)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	// Simulate tapes' pattern: request/header row with NULL tokens, then a
+	// completed row with real counts a moment later.
+	insertRowRaw(t, db, now.Add(-3*time.Minute), "claude-opus-4-6", nil, nil)
+	insertRowRaw(t, db, now.Add(-2*time.Minute), "claude-opus-4-6", int64(1000), int64(500))
+	insertRowRaw(t, db, now.Add(-time.Minute), "claude-sonnet-4-6", nil, int64(200))
+
+	rows, err := readRows(db, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("readRows errored when window contained NULL-token rows: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+
+	var totalIn, totalOut int64
+	for _, r := range rows {
+		totalIn += r.promptTokens
+		totalOut += r.completionTokens
+	}
+	if totalIn != 1000 {
+		t.Errorf("sum promptTokens = %d, want 1000", totalIn)
+	}
+	if totalOut != 700 {
+		t.Errorf("sum completionTokens = %d, want 700", totalOut)
 	}
 }
 
