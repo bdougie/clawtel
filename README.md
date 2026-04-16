@@ -131,6 +131,23 @@ clawtel: polling every 30s
 
 Stop with `Ctrl+C` or `SIGTERM`.
 
+## Reset uptime
+
+If a claw has drifted to a low uptime percentage because of a stretch without heartbeats (polling error, long downtime, machine off), you can shift the baseline so future uptime is measured from now instead of from the first-ever heartbeat:
+
+```sh
+clawtel reset
+```
+
+This:
+
+1. POSTs `{"claw_id": "..."}` to `https://ingest.claw.tech/v1/reset` with your `CLAW_INGEST_KEY`, which moves the uptime window start forward on claw.tech.
+2. Deletes the local cursor file so the next `clawtel` daemon run reads rows from "now" rather than from a stuck cursor.
+
+Token totals, message counts, and heartbeat history are **not** deleted. Only the uptime denominator is shifted.
+
+Requires `CLAW_ID` and `CLAW_INGEST_KEY` to be set — unlike the daemon path, `clawtel reset` does not silently exit when the key is missing.
+
 ## Releases
 
 Releases are fully automated. No C toolchains required.
