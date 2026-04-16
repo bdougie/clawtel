@@ -55,7 +55,7 @@ import (
 
 const (
 	ingestEndpoint = "https://ingest.claw.tech/v1/heartbeat"
-	pollInterval   = 60 * time.Minute
+	pollInterval   = 5 * time.Minute
 	version        = "0.1.0"
 )
 
