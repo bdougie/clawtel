@@ -1991,3 +1991,194 @@ func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
 		t.Error("hash should change when skills set changes")
 	}
 }
+
+// --- reset tests ---
+
+func TestRunReset_Success(t *testing.T) {
+	var receivedMethod, receivedPath, receivedAuth, receivedUA, receivedCT string
+	var receivedBody resetRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		receivedUA = r.Header.Get("User-Agent")
+		receivedCT = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &receivedBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cursorPath := filepath.Join(dir, "cursor")
+	if err := os.WriteFile(cursorPath, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runResetWithURL(server.Client(), server.URL, "ik_testkey", "clawchief", cursorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if receivedMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", receivedMethod)
+	}
+	if receivedPath != "/" {
+		t.Errorf("path = %q, want /", receivedPath)
+	}
+	if receivedAuth != "Bearer ik_testkey" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer ik_testkey")
+	}
+	if receivedUA != "clawtel/"+version {
+		t.Errorf("User-Agent = %q, want %q", receivedUA, "clawtel/"+version)
+	}
+	if receivedCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", receivedCT)
+	}
+	if receivedBody.ClawID != "clawchief" {
+		t.Errorf("body.ClawID = %q, want clawchief", receivedBody.ClawID)
+	}
+
+	if _, err := os.Stat(cursorPath); !os.IsNotExist(err) {
+		t.Errorf("cursor file still present after reset: stat err = %v", err)
+	}
+}
+
+func TestRunReset_AcceptsCreatedAndNoContent(t *testing.T) {
+	for _, code := range []int{http.StatusCreated, http.StatusNoContent} {
+		code := code
+		t.Run(fmt.Sprintf("%d", code), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer server.Close()
+
+			dir := t.TempDir()
+			cursorPath := filepath.Join(dir, "cursor")
+			if err := os.WriteFile(cursorPath, []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := runResetWithURL(server.Client(), server.URL, "ik_test", "clawchief", cursorPath); err != nil {
+				t.Fatalf("status %d: %v", code, err)
+			}
+			if _, err := os.Stat(cursorPath); !os.IsNotExist(err) {
+				t.Errorf("status %d: cursor file still present", code)
+			}
+		})
+	}
+}
+
+func TestRunReset_CursorMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cursorPath := filepath.Join(dir, "cursor-does-not-exist")
+
+	err := runResetWithURL(server.Client(), server.URL, "ik_test", "clawchief", cursorPath)
+	if err != nil {
+		t.Fatalf("reset with missing cursor should succeed, got %v", err)
+	}
+}
+
+func TestRunReset_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cursorPath := filepath.Join(dir, "cursor")
+	if err := os.WriteFile(cursorPath, []byte("keep-me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runResetWithURL(server.Client(), server.URL, "ik_test", "clawchief", cursorPath)
+	if err == nil {
+		t.Fatal("expected error for 500 response, got nil")
+	}
+
+	data, readErr := os.ReadFile(cursorPath)
+	if readErr != nil {
+		t.Fatalf("cursor file gone after failed reset: %v", readErr)
+	}
+	if string(data) != "keep-me" {
+		t.Errorf("cursor contents = %q, want %q", string(data), "keep-me")
+	}
+}
+
+func TestRunReset_Unauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cursorPath := filepath.Join(dir, "cursor")
+	if err := os.WriteFile(cursorPath, []byte("keep-me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runResetWithURL(server.Client(), server.URL, "ik_test", "clawchief", cursorPath)
+	if err == nil {
+		t.Fatal("expected error for 401 response, got nil")
+	}
+	if _, statErr := os.Stat(cursorPath); statErr != nil {
+		t.Errorf("cursor file gone after 401: %v", statErr)
+	}
+}
+
+func TestRunReset_ConnectionError(t *testing.T) {
+	client := &http.Client{Timeout: time.Second}
+
+	dir := t.TempDir()
+	cursorPath := filepath.Join(dir, "cursor")
+	if err := os.WriteFile(cursorPath, []byte("keep-me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runResetWithURL(client, "http://127.0.0.1:1", "ik_test", "clawchief", cursorPath)
+	if err == nil {
+		t.Fatal("expected connection error, got nil")
+	}
+	if _, statErr := os.Stat(cursorPath); statErr != nil {
+		t.Errorf("cursor file gone after connection error: %v", statErr)
+	}
+}
+
+func TestRunReset_PayloadShape(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cursorPath := filepath.Join(dir, "cursor")
+
+	if err := runResetWithURL(server.Client(), server.URL, "ik_test", "clawchief", cursorPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(rawBody, &decoded); err != nil {
+		t.Fatalf("body not json: %v (raw=%q)", err, rawBody)
+	}
+	if len(decoded) != 1 {
+		t.Errorf("payload has %d fields, want exactly 1 (claw_id only): %v", len(decoded), decoded)
+	}
+	if decoded["claw_id"] != "clawchief" {
+		t.Errorf("claw_id = %v, want clawchief", decoded["claw_id"])
+	}
+}
+
+func TestRunReset_UsesProductionEndpoint(t *testing.T) {
+	if resetEndpoint != "https://ingest.claw.tech/v1/reset" {
+		t.Errorf("resetEndpoint = %q, want %q", resetEndpoint, "https://ingest.claw.tech/v1/reset")
+	}
+}

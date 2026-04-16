@@ -6,6 +6,8 @@ clawtel is a single-binary Go CLI that reads token usage counts from a local [Ta
 
 The entire application is one file: `main.go` (~390 lines).
 
+The CLI has one subcommand: `clawtel reset`. It POSTs `{claw_id}` to `https://ingest.claw.tech/v1/reset` to shift the uptime baseline on claw.tech, then deletes the local cursor file so the next daemon run starts from "now". Reset is non-destructive server-side — heartbeat history and token totals are preserved.
+
 ## Architecture
 
 ```
@@ -28,6 +30,7 @@ This is the most important section. clawtel runs on users' machines next to thei
 - **Never read** any field from `.clawhub/lock.json` other than top-level `version` and `skills.<slug>.version`. Never read `installedAt`, never read `SKILL.md` content from the workdir
 - **Never add** session IDs, file paths, hostnames, IP addresses, or any PII to the heartbeat payload
 - **Never change** the `heartbeat` struct fields without explicit review — this is the network contract
+- **Never change** the `resetRequest` struct fields without explicit review — `{claw_id}` is the entire reset payload, by design
 - **`assertSchema`** must fail hard if required columns are missing and warn about sensitive columns
 - **Read-only DB access** — the SQLite connection uses `?mode=ro`
 - **No key, no network** — if `CLAW_INGEST_KEY` is unset, exit immediately with no network calls

@@ -55,9 +55,24 @@ import (
 
 const (
 	ingestEndpoint = "https://ingest.claw.tech/v1/heartbeat"
+	resetEndpoint  = "https://ingest.claw.tech/v1/reset"
 	pollInterval   = 5 * time.Minute
 	version        = "0.1.0"
 )
+
+const usage = `clawtel - local token telemetry for claw.tech
+
+Usage:
+  clawtel           run the poll loop (default)
+  clawtel reset     reset uptime baseline on claw.tech, clear local cursor
+  clawtel help      print this message
+
+Environment:
+  CLAW_INGEST_KEY         bearer token for claw.tech ingest (required)
+  CLAW_ID                 your claw identifier on the leaderboard (required)
+  TAPES_DB                override path to tapes.sqlite
+  CLAWTEL_CLAWHUB_LOCKS   comma-separated paths to .clawhub/lock.json files
+`
 
 // heartbeat is the complete payload sent to claw.tech.
 // This struct is the source of truth for what leaves your machine.
@@ -90,6 +105,20 @@ type row struct {
 func main() {
 	log.SetPrefix("clawtel: ")
 	log.SetFlags(0)
+
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "reset":
+			runResetCommand()
+			return
+		case "help", "-h", "--help":
+			fmt.Print(usage)
+			return
+		default:
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
+	}
 
 	ingestKey := os.Getenv("CLAW_INGEST_KEY")
 	if ingestKey == "" {
@@ -668,4 +697,78 @@ func parseLockPaths(env string) []string {
 		}
 	}
 	return out
+}
+
+// resetRequest is the complete payload sent to claw.tech for uptime reset.
+// Only claw_id. No paths, no cursor values, no hostnames. Auditable in one line.
+type resetRequest struct {
+	ClawID string `json:"claw_id"`
+}
+
+// runResetCommand is the `clawtel reset` entry point. Unlike the daemon path,
+// a missing CLAW_INGEST_KEY here is a hard error — the user ran this on purpose,
+// so silent exit would be confusing.
+func runResetCommand() {
+	ingestKey := os.Getenv("CLAW_INGEST_KEY")
+	if ingestKey == "" {
+		log.Fatal("CLAW_INGEST_KEY is required for reset")
+	}
+	clawID := os.Getenv("CLAW_ID")
+	if clawID == "" {
+		log.Fatal("CLAW_ID is required for reset")
+	}
+
+	dbPath, err := resolveDBPath()
+	if err != nil {
+		log.Fatal(err)
+	}
+	cursorPath := resolveCursorPath(dbPath)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	if err := runReset(client, ingestKey, clawID, cursorPath); err != nil {
+		log.Fatalf("reset: %v", err)
+	}
+	log.Printf("reset ok: uptime baseline cleared on claw.tech, cursor removed at %s", cursorPath)
+}
+
+// runReset hits the production reset endpoint. Thin wrapper around runResetWithURL.
+func runReset(client *http.Client, ingestKey, clawID, cursorPath string) error {
+	return runResetWithURL(client, resetEndpoint, ingestKey, clawID, cursorPath)
+}
+
+// runResetWithURL POSTs a reset request and, on success, removes the local
+// cursor file so the next daemon run starts from "now" instead of a stale
+// or stuck cursor value. Extracted for testability.
+//
+// The cursor file is only removed after the server confirms the reset.
+// If the cursor file is already missing, that is not an error — first-run
+// users and users who have already cleaned up should still see a clean exit.
+func runResetWithURL(client *http.Client, url, ingestKey, clawID, cursorPath string) error {
+	body, err := json.Marshal(resetRequest{ClawID: clawID})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ingestKey)
+	req.Header.Set("User-Agent", "clawtel/"+version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("reset returned %d", resp.StatusCode)
+	}
+
+	if err := os.Remove(cursorPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove cursor: %v", err)
+	}
+	return nil
 }
