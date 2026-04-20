@@ -131,6 +131,45 @@ clawtel: polling every 30s
 
 Stop with `Ctrl+C` or `SIGTERM`.
 
+## Using clawtel with OpenClaw agents
+
+If your workload is an OpenClaw agent (clawchief, staffchief, openclaw-in-a-box), setting `ANTHROPIC_BASE_URL=http://localhost:8080` is **not enough**. OpenClaw instantiates its Anthropic client with `baseURL: model.baseUrl`, which clobbers the SDK's normal `readEnv("ANTHROPIC_BASE_URL")` fallback. The gateway will hold a direct TLS connection to `api.anthropic.com` and `nodes` will stay empty forever — clawtel will send heartbeats, but every one will be `model=""`, `input_tokens=0`, `output_tokens=0`, and claw.tech will show the claw pinned at 0% uptime.
+
+Set the provider's base URL explicitly in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "models": {
+    "providers": {
+      "anthropic": {
+        "baseUrl": "http://localhost:8080",
+        "models": [
+          { "id": "claude-opus-4-7",   "name": "Claude Opus 4.7"   },
+          { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6" },
+          { "id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"  }
+        ]
+      }
+    }
+  }
+}
+```
+
+Restart the OpenClaw gateway, then verify it's talking to tapes (not Anthropic's edge directly):
+
+```sh
+ss -tnp | awk -v pid="$(pgrep -f openclaw-gateway | head -1)" '$0 ~ "pid="pid'
+# Expect a line with Peer Address  127.0.0.1:8080
+# If you see a Cloudflare IP or 160.79.*.*, tapes is still being bypassed.
+```
+
+Then confirm tapes is actually recording:
+
+```sh
+sqlite3 ~/.tapes/tapes.sqlite 'SELECT count(*), max(created_at) FROM nodes;'
+```
+
+Non-zero count = clawtel will have something to send on the next poll.
+
 ## Reset uptime
 
 If a claw has drifted to a low uptime percentage because of a stretch without heartbeats (polling error, long downtime, machine off), you can shift the baseline so future uptime is measured from now instead of from the first-ever heartbeat:
