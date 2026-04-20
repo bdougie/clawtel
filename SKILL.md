@@ -1,12 +1,16 @@
 ---
 name: clawtel-setup
 description: Use when setting up clawtel to report token usage from a project that calls the Anthropic API (SDK, Claude Code, or any tapes-wrapped agent) to the claw.tech leaderboard. Covers install, env vars, tapes wiring, verification, and running as a persistent service.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 metadata:
-  requires:
-    bins: ["tapes"]
-    env: ["CLAW_INGEST_KEY", "CLAW_ID"]
+  openclaw:
+    requires:
+      bins: ["tapes"]
+      env: ["CLAW_INGEST_KEY", "CLAW_ID"]
+    primaryEnv: CLAW_INGEST_KEY
+    emoji: "🦞"
+    homepage: https://github.com/bdougie/clawtel
 ---
 
 # clawtel setup
@@ -88,6 +92,32 @@ If the count is zero after making a call, tapes isn't in the request path — re
 
 ## Step 2 — install clawtel
 
+Pick one of the two options below. The verified path is recommended for production boxes; the convenience one-liner is fine for a laptop where you've already read the install script.
+
+### Option A — verified install (pinned release + checksum)
+
+Every release tag publishes a `checksums.txt` alongside the OS/arch tarballs. Download the release for your platform, verify against the checksum file, then move the binary onto your `PATH`:
+
+```bash
+# Adjust VERSION and PLAT for your box. Releases: https://github.com/bdougie/clawtel/releases
+VERSION=v0.1.9
+PLAT=darwin_arm64   # or linux_amd64, linux_arm64, darwin_amd64
+BASE=https://github.com/bdougie/clawtel/releases/download/${VERSION}
+
+curl -fsSLO "${BASE}/clawtel_${PLAT}.tar.gz"
+curl -fsSLO "${BASE}/checksums.txt"
+
+# Verify. sha256sum on Linux, shasum -a 256 on macOS.
+grep "clawtel_${PLAT}.tar.gz" checksums.txt | sha256sum -c -    # or: shasum -a 256 -c -
+
+tar -xzf "clawtel_${PLAT}.tar.gz"
+install -m 755 clawtel "$HOME/.local/bin/clawtel"   # or /usr/local/bin with sudo
+```
+
+### Option B — convenience one-liner (`curl | bash`)
+
+The install script is auditable in one read: <https://raw.githubusercontent.com/bdougie/clawtel/main/scripts/install.sh>. Under the hood it does the same thing as Option A — resolves the latest release, downloads the matching tarball, and drops the binary into `/usr/local/bin` (or `CLAWTEL_INSTALL_DIR`).
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bdougie/clawtel/main/scripts/install.sh | bash
 ```
@@ -99,7 +129,7 @@ CLAWTEL_INSTALL_DIR="$HOME/.local/bin" \
   curl -fsSL https://raw.githubusercontent.com/bdougie/clawtel/main/scripts/install.sh | bash
 ```
 
-Verify: `clawtel --version` should print a version string.
+Verify either path with: `clawtel --version` should print a version string that matches the release you intended to install.
 
 ## Step 3 — set environment variables
 
