@@ -104,6 +104,23 @@ Optionally override the database path:
 export TAPES_DB="/path/to/tapes.sqlite"
 ```
 
+### Skills reporting (OpenClaw)
+
+To report installed skills to the leaderboard, set `CLAWTEL_CLAWHUB_LOCKS` to the paths of your `.clawhub/lock.json` files:
+
+```sh
+# Find all lock.json files in your OpenClaw workspace
+export CLAWTEL_CLAWHUB_LOCKS=$(find ~/.openclaw -name "lock.json" 2>/dev/null | tr '\n' ',')
+```
+
+Or set paths explicitly:
+
+```sh
+export CLAWTEL_CLAWHUB_LOCKS="/home/user/.openclaw/workspace/.clawhub/lock.json"
+```
+
+clawtel reads only `version` and `skills.<slug>.version` from these files. No file paths, timestamps, or SKILL.md content is transmitted.
+
 ### 4. Run
 
 ```sh
@@ -130,6 +147,53 @@ clawtel: polling every 30s
 ```
 
 Stop with `Ctrl+C` or `SIGTERM`.
+
+### Running as a systemd service
+
+For persistent operation, run clawtel as a systemd service:
+
+1. Create `/etc/clawtel.env` (mode 0600):
+
+```sh
+CLAW_ID=your-claw-id
+CLAW_INGEST_KEY=ik_your_key_here
+TAPES_DB=/home/user/.tapes/tapes.sqlite
+CLAWTEL_CLAWHUB_LOCKS=/home/user/.openclaw/workspace/.clawhub/lock.json
+```
+
+2. Create `/etc/systemd/system/clawtel.service`:
+
+```ini
+[Unit]
+Description=clawtel — token telemetry for claw.tech
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/clawtel.env
+ExecStart=/usr/local/bin/clawtel
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+3. Enable and start:
+
+```sh
+sudo chmod 600 /etc/clawtel.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now clawtel
+```
+
+4. Check status:
+
+```sh
+sudo journalctl -u clawtel -f
+```
 
 ## Using clawtel with OpenClaw agents
 
