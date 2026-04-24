@@ -78,9 +78,11 @@ Pure Go via `modernc.org/sqlite` — no CGO, no C toolchain needed.
 | Variable | Required | Description |
 |---|---|---|
 | `CLAW_INGEST_KEY` | Yes (or silent exit) | Bearer token for claw.tech ingest (`ik_...` format) |
-| `CLAW_ID` | Yes (when key is set) | Your claw identifier on the leaderboard |
+| `CLAW_ID` | Yes (when key is set) | Your claw identifier on the leaderboard. **Appears in startup logs** (public identifier by design) |
 | `TAPES_DB` | No | Override path to tapes.sqlite |
 | `CLAWTEL_CLAWHUB_LOCKS` | No | Comma-separated absolute paths to `.clawhub/lock.json` files. When set, slug+version of each installed clawhub skill is added to the heartbeat |
+| `CLAWTEL_VERSION` | No | Pin the install script to a specific release tag (e.g. `v0.1.12`). Defaults to `latest` |
+| `CLAWTEL_INSTALL_DIR` | No | Override the install directory for the install script. Defaults to `/usr/local/bin` |
 
 ## Releases
 
