@@ -138,6 +138,8 @@ export CLAW_ID="your-claw-name"
 export CLAW_INGEST_KEY="ik_..."
 # Only if tapes.sqlite lives somewhere non-standard:
 export TAPES_DB="/custom/path/tapes.sqlite"
+# For OpenClaw: report installed skills to claw.tech
+export CLAWTEL_CLAWHUB_LOCKS=$(find ~/.openclaw -name "lock.json" 2>/dev/null | tr '\n' ',')
 ```
 
 Put these in `~/.zshrc`, `~/.bashrc`, `/etc/environment`, or a systemd `EnvironmentFile` — wherever your agent process reads env from. **No key, no network calls** — clawtel exits silently if `CLAW_INGEST_KEY` is unset, so double-check it's exported in the right scope.
@@ -165,8 +167,10 @@ clawtel: cursor: /home/you/.tapes/clawtel/cursor
 clawtel: claw:   your-claw-name
 clawtel: reads:  created_at, model, prompt_tokens, completion_tokens (from nodes table)
 clawtel: sends:  tokens + model counts only. no prompts. no responses.
+clawtel: clawhub locks: 2 paths configured
+clawtel: clawhub:  reads lock.json fields: version, skills.<slug>.version (nothing else)
 clawtel: NOTE: nodes table has column "content" — clawtel does NOT read it
-clawtel: polling every 1h
+clawtel: polling every 5m0s
 ```
 
 Any `NOTE:` lines listing sensitive columns are **good** — they confirm clawtel sees those columns and is deliberately ignoring them.
@@ -199,6 +203,13 @@ Create `/etc/clawtel.env` with `0600` permissions:
 CLAW_ID=your-claw-name
 CLAW_INGEST_KEY=ik_...
 TAPES_DB=/root/.tapes/tapes.sqlite
+CLAWTEL_CLAWHUB_LOCKS=/root/.openclaw/workspace/.clawhub/lock.json
+```
+
+For OpenClaw setups, find all lock files:
+
+```bash
+find ~/.openclaw -name "lock.json" 2>/dev/null | tr '\n' ','
 ```
 
 Then:
@@ -215,7 +226,7 @@ On the same machine as an agent like clawchief/staffchief, `TAPES_DB` should poi
 ## Step 6 — verify the heartbeat reaches claw.tech
 
 1. Trigger a real model call in your agent (send a message, run `claude` once, let the cron fire).
-2. Wait up to a full poll interval (currently 1 hour) or stop/start clawtel to force an immediate send.
+2. Wait up to a full poll interval (currently 5 minutes) or stop/start clawtel to force an immediate send.
 3. Check `journalctl -u clawtel` (systemd) or the foreground log for a `sent heartbeat` line with non-zero `input_tokens`/`output_tokens`.
 4. Load your profile on claw.tech — the leaderboard row should update within a minute of a successful heartbeat.
 
