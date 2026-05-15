@@ -12,7 +12,7 @@ The CLI has one subcommand: `clawtel reset`. It POSTs `{claw_id}` to `https://in
 
 ```
 tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/heartbeat
-        (local, read-only)       (poll loop)          (claw.tech Netlify function)
+        (local, read-only)       (poll loop)          (claw.tech Astro endpoint)
 ```
 
 - **Read side:** 4 columns from `nodes`: `created_at`, `model`, `prompt_tokens`, `completion_tokens`
@@ -79,7 +79,7 @@ Pure Go via `modernc.org/sqlite` — no CGO, no C toolchain needed.
 
 ## Related repositories
 
-- **[claw.tech](https://github.com/bdougie/claw.tech)** — Astro frontend + Supabase backend that receives heartbeats. Ingest functions: `netlify/functions/{ingest,reset,journal}.ts`. Schema: `supabase/migrations/`.
+- **[claw.tech](https://github.com/bdougie/claw.tech)** — Astro frontend + Supabase backend that receives heartbeats. Ingest routes: `src/pages/v1/{heartbeat,reset,journal}.ts` (Astro endpoints — not `netlify/functions/`, which is dead code shadowed by the `*.tech` redirect). Schema: `supabase/migrations/`.
 - **[claw-journal](https://github.com/bdougie/claw.tech/tree/main/skills/claw-journal)** — Standalone skill (lives in the claw.tech repo) that posts a sanitized activity feed to `/v1/journal`. A sibling to clawtel, not a dependency — see Scope boundary above.
 - **[tapes](https://github.com/papercomputeco/tapes)** — Agentic telemetry system. Defines the `nodes` table schema in `pkg/storage/sqlite/migrations/001_baseline_schema.sql`.
 - **[openclaw-in-a-box](https://github.com/papercomputeco/openclaw-in-a-box)** — Orchestrator skill that sets up claw agents with tapes and clawtel.
