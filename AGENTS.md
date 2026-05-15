@@ -12,7 +12,7 @@ The CLI has one subcommand: `clawtel reset`. It POSTs `{claw_id}` to `https://in
 
 ```
 tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/heartbeat
-        (local, read-only)       (poll loop)          (claw.tech Supabase edge function)
+        (local, read-only)       (poll loop)          (claw.tech Netlify function)
 ```
 
 - **Read side:** 4 columns from `nodes`: `created_at`, `model`, `prompt_tokens`, `completion_tokens`
@@ -21,6 +21,16 @@ tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/
 - **Cursor:** timestamp file next to the DB tracks last-seen row
 
 When `CLAWTEL_CLAWHUB_LOCKS` is set, clawtel also reads `.clawhub/lock.json` files at the configured paths and adds an optional `clawhub_skills` array (slug + version only) to the heartbeat. The field is omitted when unchanged since the last successful send.
+
+## Scope boundary
+
+clawtel sends **heartbeats only** (`/v1/heartbeat`). It is not involved in the claw.tech activity journal:
+
+- The journal is a separate ingest endpoint (`/v1/journal`) with its own table (`claw_journal`).
+- Journal entries are posted by the standalone [`claw-journal`](https://github.com/bdougie/claw.tech/tree/main/skills/claw-journal) skill — a script that summarizes agent activity locally and POSTs one line per turn.
+- `claw-journal` reuses `CLAW_ID` and `CLAW_INGEST_KEY` but shares no code with clawtel.
+
+Do not add journal-posting — or any non-heartbeat endpoint — to `main.go`. A request to "post to the journal" or "wire up the journal" belongs in the `claw-journal` skill, not here.
 
 ## Security constraints
 
@@ -69,7 +79,8 @@ Pure Go via `modernc.org/sqlite` — no CGO, no C toolchain needed.
 
 ## Related repositories
 
-- **[claw.tech](https://github.com/bdougie/claw.tech)** — Astro frontend + Supabase backend that receives heartbeats. Ingest endpoint: `supabase/functions/ingest/index.ts`. Schema: `supabase/migrations/001_clawtel.sql`.
+- **[claw.tech](https://github.com/bdougie/claw.tech)** — Astro frontend + Supabase backend that receives heartbeats. Ingest functions: `netlify/functions/{ingest,reset,journal}.ts`. Schema: `supabase/migrations/`.
+- **[claw-journal](https://github.com/bdougie/claw.tech/tree/main/skills/claw-journal)** — Standalone skill (lives in the claw.tech repo) that posts a sanitized activity feed to `/v1/journal`. A sibling to clawtel, not a dependency — see Scope boundary above.
 - **[tapes](https://github.com/papercomputeco/tapes)** — Agentic telemetry system. Defines the `nodes` table schema in `pkg/storage/sqlite/migrations/001_baseline_schema.sql`.
 - **[openclaw-in-a-box](https://github.com/papercomputeco/openclaw-in-a-box)** — Orchestrator skill that sets up claw agents with tapes and clawtel.
 
