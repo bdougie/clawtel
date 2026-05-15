@@ -12,7 +12,7 @@ The CLI has one subcommand: `clawtel reset`. It POSTs `{claw_id}` to `https://in
 
 ```
 tapes.sqlite (nodes table)  -->  clawtel  -->  POST https://ingest.claw.tech/v1/heartbeat
-        (local, read-only)       (poll loop)          (claw.tech Supabase edge function)
+        (local, read-only)       (poll loop)          (claw.tech Netlify function)
 ```
 
 - **Read side:** 4 columns from `nodes`: `created_at`, `model`, `prompt_tokens`, `completion_tokens`
