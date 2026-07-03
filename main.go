@@ -44,6 +44,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,6 +53,10 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// identRe restricts hasColumn's PRAGMA interpolation to plain identifiers —
+// defense in depth; all current call sites pass literals.
+var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const (
 	ingestEndpoint = "https://ingest.claw.tech/v1/heartbeat"
@@ -327,6 +332,9 @@ func latestContextTokens(db *sql.DB) (*int64, error) {
 // hasColumn reports whether table has the named column, via PRAGMA
 // table_info. Used to degrade gracefully on old tapes schemas.
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	if !identRe.MatchString(table) {
+		return false, fmt.Errorf("invalid table identifier %q", table)
+	}
 	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		return false, err

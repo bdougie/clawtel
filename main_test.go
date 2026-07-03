@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -2313,6 +2314,20 @@ func TestHasColumn_QueryError(t *testing.T) {
 	_, err := hasColumn(db, "nodes; DROP TABLE nodes", "stop_reason")
 	if err == nil {
 		t.Fatal("expected query error for malformed table identifier, got nil")
+	}
+}
+
+func TestHasColumnRejectsBadIdentifier(t *testing.T) {
+	db := openTestDB(t)
+	ok, err := hasColumn(db, "nodes) ; DROP TABLE nodes; --", "x")
+	if err == nil {
+		t.Fatal("expected error for invalid table identifier, got nil")
+	}
+	if ok {
+		t.Errorf("hasColumn returned true, want false on invalid identifier")
+	}
+	if !strings.Contains(err.Error(), "invalid table identifier") {
+		t.Errorf("error = %q, want 'invalid table identifier'", err.Error())
 	}
 }
 
