@@ -302,6 +302,76 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 	return out, sqlRows.Err()
 }
 
+// latestContextTokens returns the prompt_tokens of the most recent completed
+// turn — the closest available proxy for "how full is the context window
+// right now". Nil when no turn has usage yet. Reads only the prompt_tokens
+// and created_at columns clawtel already reads.
+func latestContextTokens(db *sql.DB) (*int64, error) {
+	const q = `
+		SELECT prompt_tokens FROM nodes
+		WHERE prompt_tokens IS NOT NULL
+		ORDER BY datetime(created_at) DESC
+		LIMIT 1
+	`
+	var v int64
+	err := db.QueryRow(q).Scan(&v)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// hasColumn reports whether table has the named column, via PRAGMA
+// table_info. Used to degrade gracefully on old tapes schemas.
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// countErrorNodes counts turns that failed mid-stream (tapes sets
+// stop_reason='error' on provider errors) since the given time. Returns
+// nil — field omitted from the heartbeat — when the tapes schema predates
+// the stop_reason column. stop_reason values are enum-like ("end_turn",
+// "error"); no user content is read.
+func countErrorNodes(db *sql.DB, since time.Time) (*int64, error) {
+	ok, err := hasColumn(db, "nodes", "stop_reason")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	const q = `
+		SELECT count(*) FROM nodes
+		WHERE stop_reason = 'error'
+		  AND datetime(created_at) > datetime(?)
+	`
+	var v int64
+	if err := db.QueryRow(q, since.UTC().Format(time.RFC3339Nano)).Scan(&v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // parseCreatedAt accepts the three timestamp shapes clawtel can encounter:
 //
 //  1. RFC3339Nano ("T" separator, Z or numeric offset) — clawtel's own

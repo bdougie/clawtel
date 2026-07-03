@@ -60,6 +60,49 @@ func insertRow(t *testing.T, db *sql.DB, createdAt time.Time, model string, prom
 	}
 }
 
+// openTestDB creates an in-memory nodes table that includes the stop_reason
+// column, for tests of latestContextTokens and countErrorNodes.
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `CREATE TABLE nodes (
+		created_at TEXT NOT NULL,
+		model TEXT,
+		prompt_tokens INTEGER,
+		completion_tokens INTEGER,
+		stop_reason TEXT
+	)`)
+	return db
+}
+
+// openTestDBWithoutStopReason creates an in-memory nodes table matching an
+// old tapes schema that predates the stop_reason column.
+func openTestDBWithoutStopReason(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, `CREATE TABLE nodes (
+		created_at TEXT NOT NULL,
+		model TEXT,
+		prompt_tokens INTEGER,
+		completion_tokens INTEGER
+	)`)
+	return db
+}
+
+// mustExec runs a statement against db and fails the test on error.
+func mustExec(t *testing.T, db *sql.DB, query string, args ...interface{}) {
+	t.Helper()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("exec: %v\nquery: %s", err, query)
+	}
+}
+
 // lockFixtures writes the canonical lock.json fixtures used across clawhub tests
 // to a fresh t.TempDir() and returns paths. `missing` points at a file that is
 // never created — useful for "skip missing file" assertions.
@@ -2181,4 +2224,122 @@ func TestRunReset_UsesProductionEndpoint(t *testing.T) {
 	if resetEndpoint != "https://ingest.claw.tech/v1/reset" {
 		t.Errorf("resetEndpoint = %q, want %q", resetEndpoint, "https://ingest.claw.tech/v1/reset")
 	}
+}
+
+// --- latestContextTokens / countErrorNodes / hasColumn tests ---
+
+func TestLatestContextTokens(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, `INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens) VALUES
+		('2026-07-03 11:00:00', 'opus', 50000, 100),
+		('2026-07-03 12:00:00', 'opus', 84000, 200),
+		('2026-07-03 12:01:00', 'opus', NULL, NULL)`)
+
+	got, err := latestContextTokens(db)
+	if err != nil {
+		t.Fatalf("latestContextTokens: %v", err)
+	}
+	if got == nil || *got != 84000 {
+		t.Errorf("got %v, want 84000 (latest non-null prompt_tokens)", got)
+	}
+}
+
+func TestLatestContextTokensEmptyDB(t *testing.T) {
+	db := openTestDB(t)
+	got, err := latestContextTokens(db)
+	if err != nil {
+		t.Fatalf("latestContextTokens: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %v, want nil on empty table", *got)
+	}
+}
+
+func TestCountErrorNodes(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, `INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens, stop_reason) VALUES
+		('2026-07-03 11:00:00', 'opus', 1, 1, 'error'),
+		('2026-07-03 12:00:00', 'opus', 1, 1, 'error'),
+		('2026-07-03 12:01:00', 'opus', 1, 1, 'end_turn')`)
+
+	since := time.Date(2026, 7, 3, 11, 30, 0, 0, time.UTC)
+	got, err := countErrorNodes(db, since)
+	if err != nil {
+		t.Fatalf("countErrorNodes: %v", err)
+	}
+	if got == nil || *got != 1 {
+		t.Errorf("got %v, want 1 (only the error row after since)", got)
+	}
+}
+
+func TestCountErrorNodesMissingColumn(t *testing.T) {
+	db := openTestDBWithoutStopReason(t) // schema WITHOUT stop_reason
+	got, err := countErrorNodes(db, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("countErrorNodes must not error on old schemas: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %v, want nil when stop_reason column is absent", *got)
+	}
+}
+
+func TestHasColumn_Present(t *testing.T) {
+	db := openTestDB(t)
+	ok, err := hasColumn(db, "nodes", "stop_reason")
+	if err != nil {
+		t.Fatalf("hasColumn: %v", err)
+	}
+	if !ok {
+		t.Errorf("hasColumn = false, want true (stop_reason present)")
+	}
+}
+
+func TestHasColumn_Absent(t *testing.T) {
+	db := openTestDBWithoutStopReason(t)
+	ok, err := hasColumn(db, "nodes", "stop_reason")
+	if err != nil {
+		t.Fatalf("hasColumn: %v", err)
+	}
+	if ok {
+		t.Errorf("hasColumn = true, want false (stop_reason absent)")
+	}
+}
+
+func TestHasColumn_QueryError(t *testing.T) {
+	db := openTestDB(t)
+	// An invalid table identifier (embedded semicolon) makes the
+	// PRAGMA statement itself a syntax error, exercising the db.Query
+	// error branch without needing to mock the sql.DB interface.
+	_, err := hasColumn(db, "nodes; DROP TABLE nodes", "stop_reason")
+	if err == nil {
+		t.Fatal("expected query error for malformed table identifier, got nil")
+	}
+}
+
+func TestLatestContextTokens_QueryError(t *testing.T) {
+	db := openTestDB(t)
+	db.Close()
+	_, err := latestContextTokens(db)
+	if err == nil {
+		t.Fatal("expected error on closed db, got nil")
+	}
+}
+
+func TestCountErrorNodes_HasColumnError(t *testing.T) {
+	db := openTestDB(t)
+	db.Close()
+	_, err := countErrorNodes(db, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected error on closed db (propagated from hasColumn), got nil")
+	}
+}
+
+func TestCountErrorNodes_QueryErrorAfterHasColumn(t *testing.T) {
+	// This is hard to trigger with a real *sql.DB — by the time hasColumn
+	// has confirmed stop_reason exists, the count query below it uses the
+	// same connection and schema, so it cannot independently fail without
+	// mocking the driver. We accept that this branch (and hasColumn's own
+	// rows.Scan error branch) is defensive and not practically reachable
+	// without a mocked sql.DB interface, matching the precedent set by
+	// TestAssertSchema_ScanError for assertSchema's equivalent gap.
 }
