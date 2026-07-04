@@ -661,7 +661,7 @@ func TestPoll_Success(t *testing.T) {
 	defer server.Close()
 
 	cursor := now.Add(-time.Hour)
-	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestPoll_SendError(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err == nil {
 		t.Fatal("expected error from send failure, got nil")
 	}
@@ -704,7 +704,7 @@ func TestPoll_EmptyDB(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +732,7 @@ func TestPoll_SendsOneHeartbeatPerModel(t *testing.T) {
 	defer server.Close()
 
 	cursor := now.Add(-time.Hour)
-	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -776,7 +776,7 @@ func TestPoll_ClawhubSkillsOnlyOnFirstHeartbeat(t *testing.T) {
 
 	valid, _, _, _ := lockFixtures(t)
 	cursor := now.Add(-time.Hour)
-	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, []string{valid}, "")
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, []string{valid}, "", probeConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func TestPoll_StopsOnFirstSendError(t *testing.T) {
 	defer server.Close()
 
 	cursor := now.Add(-time.Hour)
-	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	_, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err == nil {
 		t.Fatal("expected error from send failure, got nil")
 	}
@@ -994,7 +994,7 @@ func TestPoll_ReadError(t *testing.T) {
 	defer server.Close()
 
 	cursor := time.Now().UTC().Add(-time.Hour)
-	_, _, pollErr := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	_, _, pollErr := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if pollErr == nil {
 		t.Fatal("expected error from readRows failure, got nil")
 	}
@@ -1260,7 +1260,7 @@ func TestPoll_TwoPolls_TapesFormat_IssueRepro(t *testing.T) {
 
 	// Poll 1. Cursor starts 1 hour ago so the existing row is visible.
 	cursor := now.Add(-time.Hour)
-	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatalf("poll 1: %v", err)
 	}
@@ -1278,7 +1278,7 @@ func TestPoll_TwoPolls_TapesFormat_IssueRepro(t *testing.T) {
 	insertRowTapesFormat(t, db, afterFirstPoll, "between-polls", 200, 100)
 
 	// Poll 2. Must see the new row.
-	_, _, err = pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", newCursor, nil, "")
+	_, _, err = pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", newCursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatalf("poll 2: %v", err)
 	}
@@ -1320,7 +1320,7 @@ func TestPoll_CursorRoundtripThroughDisk_TapesFormat(t *testing.T) {
 	}
 	// First-run cursor is "now" so back-date to see existing rows.
 	cursor = now.Add(-time.Hour)
-	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "")
+	newCursor, _, err := pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", cursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatalf("poll 1: %v", err)
 	}
@@ -1348,7 +1348,7 @@ func TestPoll_CursorRoundtripThroughDisk_TapesFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCursor (second run): %v", err)
 	}
-	_, _, err = pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", loadedCursor, nil, "")
+	_, _, err = pollWithURL(db, server.Client(), server.URL, "ik_test", "test-claw", loadedCursor, nil, "", probeConfig{})
 	if err != nil {
 		t.Fatalf("poll 2: %v", err)
 	}
@@ -1933,7 +1933,7 @@ func TestPoll_IncludesSkillsOnFirstSend(t *testing.T) {
 	cursor := time.Now().UTC().Add(-time.Hour)
 	_, newHash, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		[]string{valid}, "",
+		[]string{valid}, "", probeConfig{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1963,7 +1963,7 @@ func TestPoll_OmitsSkillsWhenHashUnchanged(t *testing.T) {
 	cursor := time.Now().UTC().Add(-time.Hour)
 	_, newHash, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		[]string{valid}, expectedHash,
+		[]string{valid}, expectedHash, probeConfig{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1990,7 +1990,7 @@ func TestPoll_NoSkillsWhenNoLockPaths(t *testing.T) {
 	cursor := time.Now().UTC().Add(-time.Hour)
 	_, newHash, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		nil, "",
+		nil, "", probeConfig{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2017,7 +2017,7 @@ func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
 
 	_, hash1, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		nil, "",
+		nil, "", probeConfig{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2025,7 +2025,7 @@ func TestPoll_HashChangesWhenSkillsChange(t *testing.T) {
 
 	_, hash2, err := pollWithURL(
 		db, server.Client(), server.URL, "ik_test", "test-claw", cursor,
-		[]string{valid}, hash1,
+		[]string{valid}, hash1, probeConfig{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2392,5 +2392,76 @@ func TestGatewayProcessUp(t *testing.T) {
 	}
 	if gatewayProcessUp("definitely-not-a-real-process-name-xyz") {
 		t.Error("want false for a nonexistent process")
+	}
+}
+
+// --- pollWithURL: health fields wiring ---
+
+func TestPollWithURLAttachesHealthFields(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, `INSERT INTO nodes (created_at, model, prompt_tokens, completion_tokens, stop_reason) VALUES
+		('2026-07-03 12:00:00', 'opus', 84000, 200, 'error')`)
+
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // wedged
+	}))
+	defer gateway.Close()
+
+	var sent []map[string]any
+	ingest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		sent = append(sent, m)
+	}))
+	defer ingest.Close()
+
+	probes := probeConfig{gatewayHealthURL: gateway.URL, gatewayProc: "clawtel.test"}
+	cursor := time.Date(2026, 7, 3, 11, 0, 0, 0, time.UTC)
+	_, _, err := pollWithURL(db, http.DefaultClient, ingest.URL, "key", "claw", cursor, nil, "", probes)
+	if err != nil {
+		t.Fatalf("pollWithURL: %v", err)
+	}
+	if len(sent) == 0 {
+		t.Fatal("no heartbeats sent")
+	}
+	hb := sent[0]
+	if hb["context_tokens"] != float64(84000) {
+		t.Errorf("context_tokens = %v, want 84000", hb["context_tokens"])
+	}
+	if hb["error_count"] != float64(1) {
+		t.Errorf("error_count = %v, want 1", hb["error_count"])
+	}
+	if hb["gateway_process_up"] != true {
+		t.Errorf("gateway_process_up = %v, want true", hb["gateway_process_up"])
+	}
+	if hb["gateway_health_ok"] != false {
+		t.Errorf("gateway_health_ok = %v, want false (wedged signature)", hb["gateway_health_ok"])
+	}
+}
+
+func TestPollWithURLOmitsGatewayFieldsWhenDisabled(t *testing.T) {
+	db := openTestDB(t)
+
+	var sent []map[string]any
+	ingest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		sent = append(sent, m)
+	}))
+	defer ingest.Close()
+
+	probes := probeConfig{} // no CLAWTEL_GATEWAY_HEALTH_URL
+	cursor := time.Now().UTC().Add(-5 * time.Minute)
+	_, _, err := pollWithURL(db, http.DefaultClient, ingest.URL, "key", "claw", cursor, nil, "", probes)
+	if err != nil {
+		t.Fatalf("pollWithURL: %v", err)
+	}
+	if _, present := sent[0]["gateway_process_up"]; present {
+		t.Error("gateway fields must be omitted when the probe is not configured")
+	}
+	if _, present := sent[0]["gateway_health_ok"]; present {
+		t.Error("gateway fields must be omitted when the probe is not configured")
 	}
 }
