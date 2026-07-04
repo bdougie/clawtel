@@ -2308,9 +2308,9 @@ func TestHasColumn_Absent(t *testing.T) {
 
 func TestHasColumn_QueryError(t *testing.T) {
 	db := openTestDB(t)
-	// An invalid table identifier (embedded semicolon) makes the
-	// PRAGMA statement itself a syntax error, exercising the db.Query
-	// error branch without needing to mock the sql.DB interface.
+	// An invalid table identifier (embedded semicolon) trips the identRe
+	// guard in hasColumn before any query runs, exercising that
+	// validation branch without needing to mock the sql.DB interface.
 	_, err := hasColumn(db, "nodes; DROP TABLE nodes", "stop_reason")
 	if err == nil {
 		t.Fatal("expected query error for malformed table identifier, got nil")
@@ -2476,5 +2476,41 @@ func TestPollWithURLOmitsGatewayFieldsWhenDisabled(t *testing.T) {
 	}
 	if _, present := sent[0]["gateway_health_ok"]; present {
 		t.Error("gateway fields must be omitted when the probe is not configured")
+	}
+}
+
+func TestPollWithURLAttachesGatewayFieldsToPresencePing(t *testing.T) {
+	db := openTestDB(t) // empty nodes table: window has no rows, so this is a presence ping
+
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // wedged
+	}))
+	defer gateway.Close()
+
+	var sent []map[string]any
+	ingest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		sent = append(sent, m)
+	}))
+	defer ingest.Close()
+
+	probes := probeConfig{gatewayHealthURL: gateway.URL, gatewayProc: "clawtel.test"}
+	cursor := time.Now().UTC().Add(-5 * time.Minute)
+	_, _, err := pollWithURL(db, http.DefaultClient, ingest.URL, "key", "claw", cursor, nil, "", probes)
+	if err != nil {
+		t.Fatalf("pollWithURL: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("want exactly one presence-ping heartbeat, got %d", len(sent))
+	}
+	hb := sent[0]
+	if hb["gateway_process_up"] != true {
+		t.Errorf("gateway_process_up = %v, want true", hb["gateway_process_up"])
+	}
+	if hb["gateway_health_ok"] != false {
+		t.Errorf("gateway_health_ok = %v, want false (wedged signature)", hb["gateway_health_ok"])
 	}
 }

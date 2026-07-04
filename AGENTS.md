@@ -4,7 +4,7 @@
 
 clawtel is a single-binary Go CLI that reads token usage counts from a local [Tapes](https://github.com/papercomputeco/tapes) SQLite database and reports them as heartbeats to [claw.tech](https://claw.tech) for leaderboard tracking.
 
-The entire application is one file: `main.go` (~390 lines).
+The entire application is one file: `main.go` (~950 lines).
 
 The CLI has one subcommand: `clawtel reset`. It POSTs `{claw_id}` to `https://ingest.claw.tech/v1/reset` to shift the uptime baseline on claw.tech, then deletes the local cursor file so the next daemon run starts from "now". Reset is non-destructive server-side — heartbeat history and token totals are preserved.
 

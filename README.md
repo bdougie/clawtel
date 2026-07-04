@@ -47,7 +47,7 @@ When `CLAWTEL_GATEWAY_HEALTH_URL` is set, clawtel additionally probes the local 
 
 On startup, clawtel logs every sensitive column it finds in the database so you can see exactly what it is *not* reading. If any of the 4 required columns (`created_at`, `model`, `prompt_tokens`, `completion_tokens`) are missing, it exits immediately.
 
-The entire application is one file (`main.go`, ~390 lines). Read `send()` to verify the network payload. Read `readRows()` to verify the SQL query.
+The entire application is one file (`main.go`, ~950 lines). Read `send()` to verify the network payload. Read `readRows()` to verify the SQL query.
 
 **No key, no network calls.** If `CLAW_INGEST_KEY` is not set, clawtel exits silently. No DNS lookups, no HTTP connections, nothing.
 

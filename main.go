@@ -119,8 +119,10 @@ type heartbeat struct {
 	GatewayHealthOk  *bool  `json:"gateway_health_ok,omitempty"`
 }
 
-// row is what clawtel reads from tapes.sqlite.
-// Four columns from the nodes table. Nothing else is queried.
+// row is what clawtel reads from tapes.sqlite via readRows: four columns
+// from the nodes table, used for token aggregation. The other read paths
+// (latestContextTokens, countErrorNodes) query prompt_tokens/stop_reason
+// directly and do not populate this struct.
 type row struct {
 	createdAt        time.Time
 	model            string
@@ -297,8 +299,10 @@ func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string,
 	return windowEnd, newHash, nil
 }
 
-// readRows queries ONLY these four columns from the nodes table.
-// This is the complete read surface.
+// readRows queries only these four columns for token aggregation. The
+// other read paths are latestContextTokens (prompt_tokens) and
+// countErrorNodes (stop_reason) — together these are the complete read
+// surface.
 //
 // Both sides of the timestamp comparison are wrapped in SQLite's datetime()
 // so tapes' on-disk format (space separator, numeric offset) and clawtel's
