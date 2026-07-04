@@ -6,11 +6,15 @@ Local token telemetry for [claw.tech](https://claw.tech). Reads aggregate usage 
 
 Read this first. clawtel is designed to be auditable in a single sitting.
 
-**What clawtel reads** (4 columns from the `nodes` table in tapes.sqlite):
+**What clawtel reads** (5 columns from the `nodes` table in tapes.sqlite):
 
 ```
-created_at, model, prompt_tokens, completion_tokens
+created_at, model, prompt_tokens, completion_tokens, stop_reason
 ```
+
+`stop_reason` is enum-like (`end_turn`, `error`, ...) — no user content. It is read only when present; clawtel degrades gracefully on tapes schemas that predate the column.
+
+When `CLAWTEL_GATEWAY_HEALTH_URL` is set, clawtel additionally probes the local OpenClaw gateway: an HTTP GET to that URL, and a `pgrep -f` check for the gateway process. Only a boolean up/down result is read from each probe — no response bodies, no process command lines.
 
 **What clawtel sends** (the complete heartbeat payload):
 
@@ -22,9 +26,15 @@ created_at, model, prompt_tokens, completion_tokens
   "model": "claude-opus-4-6",
   "input_tokens": 15000,
   "output_tokens": 5000,
-  "message_count": 42
+  "message_count": 42,
+  "context_tokens": 84000,
+  "error_count": 1,
+  "gateway_process_up": true,
+  "gateway_health_ok": false
 }
 ```
+
+`context_tokens`, `error_count`, `gateway_process_up`, and `gateway_health_ok` are all optional — omitted entirely (not `null`) when the underlying probe has nothing to report. The `gateway_*` fields are omitted unless `CLAWTEL_GATEWAY_HEALTH_URL` is configured.
 
 **What clawtel never reads or sends:**
 
@@ -33,10 +43,11 @@ created_at, model, prompt_tokens, completion_tokens
 - Session IDs or conversation structure
 - File paths, hostnames, or project names
 - The `content`, `bucket`, `project`, or `agent_name` columns in tapes
+- Gateway health-check response bodies or process command lines
 
-On startup, clawtel logs every sensitive column it finds in the database so you can see exactly what it is *not* reading. If any of the 4 required columns are missing, it exits immediately.
+On startup, clawtel logs every sensitive column it finds in the database so you can see exactly what it is *not* reading. If any of the 4 required columns (`created_at`, `model`, `prompt_tokens`, `completion_tokens`) are missing, it exits immediately.
 
-The entire application is one file (`main.go`, ~390 lines). Read `send()` to verify the network payload. Read `readRows()` to verify the SQL query.
+The entire application is one file (`main.go`, ~950 lines). Read `send()` to verify the network payload. Read `readRows()` to verify the SQL query.
 
 **No key, no network calls.** If `CLAW_INGEST_KEY` is not set, clawtel exits silently. No DNS lookups, no HTTP connections, nothing.
 
@@ -104,6 +115,17 @@ Optionally override the database path:
 export TAPES_DB="/path/to/tapes.sqlite"
 ```
 
+Full reference:
+
+| Variable | Required | Description |
+|---|---|---|
+| `CLAW_INGEST_KEY` | Yes (or silent exit) | Bearer token for claw.tech ingest |
+| `CLAW_ID` | Yes (when key is set) | Your claw identifier on the leaderboard |
+| `TAPES_DB` | No | Override path to tapes.sqlite |
+| `CLAWTEL_CLAWHUB_LOCKS` | No | Comma-separated paths to `.clawhub/lock.json` files |
+| `CLAWTEL_GATEWAY_HEALTH_URL` | No | OpenClaw gateway health endpoint (e.g. `http://127.0.0.1:18789/health`). When set, each heartbeat carries `gateway_process_up`/`gateway_health_ok` so claw.tech can flag a wedged gateway as RESTART NEEDED |
+| `CLAWTEL_GATEWAY_PROC` | No | pgrep pattern for the gateway process (default `openclaw-gateway`) |
+
 ### Skills reporting (OpenClaw)
 
 To report installed skills to the leaderboard, set `CLAWTEL_CLAWHUB_LOCKS` to the paths of your `.clawhub/lock.json` files:
@@ -135,15 +157,15 @@ go build -o clawtel .
 clawtel logs its configuration on startup:
 
 ```
-clawtel: clawtel 0.1.0
+clawtel: clawtel 0.2.0
 clawtel: db:     /home/user/.tapes/tapes.sqlite
 clawtel: cursor: /home/user/.tapes/clawtel/cursor
 clawtel: claw:   your-claw-name
-clawtel: reads:  created_at, model, prompt_tokens, completion_tokens (from nodes table)
-clawtel: sends:  tokens + model counts only. no prompts. no responses.
+clawtel: reads:  created_at, model, prompt_tokens, completion_tokens, stop_reason (from nodes table)
+clawtel: sends:  tokens + model counts, context/error/gateway health (optional). no prompts. no responses.
 clawtel: NOTE: nodes table has column "content" — clawtel does NOT read it
 clawtel: NOTE: nodes table has column "bucket" — clawtel does NOT read it
-clawtel: polling every 30s
+clawtel: polling every 5m0s
 ```
 
 Stop with `Ctrl+C` or `SIGTERM`.
@@ -233,6 +255,16 @@ sqlite3 ~/.tapes/tapes.sqlite 'SELECT count(*), max(created_at) FROM nodes;'
 ```
 
 Non-zero count = clawtel will have something to send on the next poll.
+
+## Restart detection
+
+When `CLAWTEL_GATEWAY_HEALTH_URL` is configured, clawtel attaches `gateway_process_up` and `gateway_health_ok` to every heartbeat — including idle presence pings, so a wedged-but-idle gateway is still caught. If the process is up but health checks fail for 2 consecutive heartbeats, the claw's page on claw.tech shows **RESTART NEEDED**.
+
+Fix with:
+
+```sh
+openclaw gateway restart
+```
 
 ## Reset uptime
 

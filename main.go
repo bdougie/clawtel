@@ -2,12 +2,13 @@
 //
 // SECURITY MODEL (read this first):
 //
-// clawtel reads four columns from your local Tapes SQLite database (nodes table):
+// clawtel reads five columns from your local Tapes SQLite database (nodes table):
 //
-//   created_at, model, prompt_tokens, completion_tokens
+//   created_at, model, prompt_tokens, completion_tokens, stop_reason
 //
 // It reads nothing else. No prompts. No responses. No tool calls.
-// No session IDs. No file paths. No hostnames.
+// No session IDs. No file paths. No hostnames. stop_reason is enum-like
+// ("end_turn", "error", ...) and carries no user content.
 //
 // When CLAWTEL_CLAWHUB_LOCKS is set, clawtel ALSO reads
 // .clawhub/lock.json files at the configured paths. From each file it reads
@@ -15,11 +16,17 @@
 // It NEVER reads `installedAt` or any other field. It NEVER reads SKILL.md
 // content from disk.
 //
+// When CLAWTEL_GATEWAY_HEALTH_URL is set, clawtel ALSO probes the local
+// OpenClaw gateway: an HTTP GET to that URL, and a `pgrep -f` process check
+// against CLAWTEL_GATEWAY_PROC. Only a boolean up/down result from each
+// probe is transmitted. No response bodies, no process arguments.
+//
 // The payload sent to claw.tech contains:
 //
 //   claw_id, window_start, window_end, model,
 //   input_tokens (from prompt_tokens), output_tokens (from completion_tokens),
-//   message_count, and optionally clawhub_skills (slug + version per skill).
+//   message_count, and optionally clawhub_skills (slug + version per skill),
+//   context_tokens, error_count, gateway_process_up, gateway_health_ok.
 //
 // That is the complete list. You can verify this by reading send().
 //
@@ -42,8 +49,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,11 +62,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// identRe restricts hasColumn's PRAGMA interpolation to plain identifiers —
+// defense in depth; all current call sites pass literals.
+var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 const (
 	ingestEndpoint = "https://ingest.claw.tech/v1/heartbeat"
 	resetEndpoint  = "https://ingest.claw.tech/v1/reset"
 	pollInterval   = 5 * time.Minute
-	version        = "0.1.0"
+	version        = "0.2.0"
 )
 
 const usage = `clawtel - local token telemetry for claw.tech
@@ -72,6 +85,8 @@ Environment:
   CLAW_ID                 your claw identifier on the leaderboard (required)
   TAPES_DB                override path to tapes.sqlite
   CLAWTEL_CLAWHUB_LOCKS   comma-separated paths to .clawhub/lock.json files
+  CLAWTEL_GATEWAY_HEALTH_URL  OpenClaw gateway health endpoint (enables gateway probe)
+  CLAWTEL_GATEWAY_PROC        pgrep pattern for the gateway process (default openclaw-gateway)
 `
 
 // heartbeat is the complete payload sent to claw.tech.
@@ -91,10 +106,23 @@ type heartbeat struct {
 	// Each entry contains ONLY slug and version. No paths, timestamps, or
 	// content from the lock file are transmitted.
 	ClawhubSkills []skill `json:"clawhub_skills,omitempty"`
+
+	// Observability fields (clawtel >= 0.2.0). All optional; nil = omitted.
+	// context_tokens: prompt_tokens of the latest completed turn (~current context).
+	// error_count: tapes nodes with stop_reason='error' in this window.
+	// gateway_*: OpenClaw gateway probe results — only sent when
+	// CLAWTEL_GATEWAY_HEALTH_URL is configured. Counts and booleans only;
+	// no content, paths, or identifiers.
+	ContextTokens    *int64 `json:"context_tokens,omitempty"`
+	ErrorCount       *int64 `json:"error_count,omitempty"`
+	GatewayProcessUp *bool  `json:"gateway_process_up,omitempty"`
+	GatewayHealthOk  *bool  `json:"gateway_health_ok,omitempty"`
 }
 
-// row is what clawtel reads from tapes.sqlite.
-// Four columns from the nodes table. Nothing else is queried.
+// row is what clawtel reads from tapes.sqlite via readRows: four columns
+// from the nodes table, used for token aggregation. The other read paths
+// (latestContextTokens, countErrorNodes) query prompt_tokens/stop_reason
+// directly and do not populate this struct.
 type row struct {
 	createdAt        time.Time
 	model            string
@@ -140,12 +168,23 @@ func main() {
 
 	lockPaths := parseLockPaths(os.Getenv("CLAWTEL_CLAWHUB_LOCKS"))
 
+	probes := probeConfig{
+		gatewayHealthURL: os.Getenv("CLAWTEL_GATEWAY_HEALTH_URL"),
+		gatewayProc:      os.Getenv("CLAWTEL_GATEWAY_PROC"),
+	}
+	if probes.gatewayProc == "" {
+		probes.gatewayProc = "openclaw-gateway"
+	}
+
 	log.Printf("clawtel %s", version)
 	log.Printf("db:     %s", dbPath)
 	log.Printf("cursor: %s", cursorPath)
 	log.Printf("claw:   %s", clawID)
-	log.Printf("reads:  created_at, model, prompt_tokens, completion_tokens (from nodes table)")
-	log.Printf("sends:  tokens + model counts only. no prompts. no responses.")
+	log.Printf("reads:  created_at, model, prompt_tokens, completion_tokens, stop_reason (from nodes table)")
+	log.Printf("sends:  tokens + model counts, context/error/gateway health (optional). no prompts. no responses.")
+	if probes.gatewayHealthURL != "" {
+		log.Printf("gateway probe: %s (proc pattern %q)", probes.gatewayHealthURL, probes.gatewayProc)
+	}
 	if len(lockPaths) > 0 {
 		log.Printf("clawhub locks: %d paths configured", len(lockPaths))
 		log.Printf("clawhub:  reads lock.json fields: version, skills.<slug>.version (nothing else)")
@@ -186,7 +225,7 @@ func main() {
 			log.Println("shutting down")
 			return
 		case <-ticker.C:
-			newCursor, newHash, err := poll(db, client, ingestKey, clawID, cursor, lockPaths, lastSkillsHash)
+			newCursor, newHash, err := poll(db, client, ingestKey, clawID, cursor, lockPaths, lastSkillsHash, probes)
 			if err != nil {
 				log.Printf("poll error: %v", err)
 				continue
@@ -206,8 +245,8 @@ func main() {
 // A heartbeat is always sent — even with zero new rows — so that
 // claw.tech can distinguish "online but idle" from "offline".
 // Returns the new cursor timestamp and the new skills hash on success.
-func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
-	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor, lockPaths, lastSkillsHash)
+func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string, probes probeConfig) (time.Time, string, error) {
+	return pollWithURL(db, client, ingestEndpoint, ingestKey, clawID, cursor, lockPaths, lastSkillsHash, probes)
 }
 
 // pollWithURL is the testable version of poll that accepts a custom endpoint URL.
@@ -219,7 +258,7 @@ func poll(db *sql.DB, client *http.Client, ingestKey, clawID string, cursor time
 // On send failure the loop stops immediately, returning the original cursor
 // and skills hash. The next poll will re-read rows since the cursor and
 // retry the whole window — no partial progress is persisted.
-func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string) (time.Time, string, error) {
+func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string, cursor time.Time, lockPaths []string, lastSkillsHash string, probes probeConfig) (time.Time, string, error) {
 	windowStart := cursor
 	windowEnd := time.Now().UTC()
 
@@ -229,6 +268,14 @@ func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string,
 	}
 
 	hbs := aggregate(clawID, windowStart, windowEnd, rows)
+
+	ctxTokens, errCount, procUp, healthOk := collectHealth(db, client, probes, windowStart)
+	for i := range hbs {
+		hbs[i].ContextTokens = ctxTokens
+		hbs[i].ErrorCount = errCount
+		hbs[i].GatewayProcessUp = procUp
+		hbs[i].GatewayHealthOk = healthOk
+	}
 
 	skills := loadSkills(lockPaths)
 	newHash := hashSkills(skills)
@@ -252,8 +299,10 @@ func pollWithURL(db *sql.DB, client *http.Client, url, ingestKey, clawID string,
 	return windowEnd, newHash, nil
 }
 
-// readRows queries ONLY these four columns from the nodes table.
-// This is the complete read surface.
+// readRows queries only these four columns for token aggregation. The
+// other read paths are latestContextTokens (prompt_tokens) and
+// countErrorNodes (stop_reason) — together these are the complete read
+// surface.
 //
 // Both sides of the timestamp comparison are wrapped in SQLite's datetime()
 // so tapes' on-disk format (space separator, numeric offset) and clawtel's
@@ -300,6 +349,107 @@ func readRows(db *sql.DB, since time.Time) ([]row, error) {
 		out = append(out, r)
 	}
 	return out, sqlRows.Err()
+}
+
+// latestContextTokens returns the prompt_tokens of the most recent completed
+// turn — the closest available proxy for "how full is the context window
+// right now". Nil when no turn has usage yet. Reads only the prompt_tokens
+// and created_at columns clawtel already reads.
+func latestContextTokens(db *sql.DB) (*int64, error) {
+	const q = `
+		SELECT prompt_tokens FROM nodes
+		WHERE prompt_tokens IS NOT NULL
+		ORDER BY datetime(created_at) DESC
+		LIMIT 1
+	`
+	var v int64
+	err := db.QueryRow(q).Scan(&v)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// hasColumn reports whether table has the named column, via PRAGMA
+// table_info. Used to degrade gracefully on old tapes schemas.
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	if !identRe.MatchString(table) {
+		return false, fmt.Errorf("invalid table identifier %q", table)
+	}
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// countErrorNodes counts turns that failed mid-stream (tapes sets
+// stop_reason='error' on provider errors) since the given time. Returns
+// nil — field omitted from the heartbeat — when the tapes schema predates
+// the stop_reason column. stop_reason values are enum-like ("end_turn",
+// "error"); no user content is read.
+func countErrorNodes(db *sql.DB, since time.Time) (*int64, error) {
+	ok, err := hasColumn(db, "nodes", "stop_reason")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	const q = `
+		SELECT count(*) FROM nodes
+		WHERE stop_reason = 'error'
+		  AND datetime(created_at) > datetime(?)
+	`
+	var v int64
+	if err := db.QueryRow(q, since.UTC().Format(time.RFC3339Nano)).Scan(&v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// probeConfig controls the optional OpenClaw gateway probe.
+// gatewayHealthURL == "" disables it entirely (fields omitted).
+type probeConfig struct {
+	gatewayHealthURL string
+	gatewayProc      string
+}
+
+// collectHealth gathers the observability fields for one poll window.
+// Tapes read errors are logged, not fatal — a heartbeat with missing
+// health fields beats no heartbeat.
+func collectHealth(db *sql.DB, client *http.Client, cfg probeConfig, since time.Time) (ctx, errs *int64, procUp, healthOk *bool) {
+	var err error
+	ctx, err = latestContextTokens(db)
+	if err != nil {
+		log.Printf("context probe: %v", err)
+	}
+	errs, err = countErrorNodes(db, since)
+	if err != nil {
+		log.Printf("error-count probe: %v", err)
+	}
+	if cfg.gatewayHealthURL != "" {
+		up := gatewayProcessUp(cfg.gatewayProc)
+		ok := probeGatewayHealth(client, cfg.gatewayHealthURL)
+		procUp, healthOk = &up, &ok
+	}
+	return ctx, errs, procUp, healthOk
 }
 
 // parseCreatedAt accepts the three timestamp shapes clawtel can encounter:
@@ -412,6 +562,32 @@ func sendToURL(client *http.Client, url, ingestKey string, hb heartbeat) error {
 		return fmt.Errorf("ingest returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// probeGatewayHealth GETs the OpenClaw gateway's /health endpoint.
+// The endpoint is designed for external monitors: instant, no session,
+// no LLM call, 200 {"ok":true} when healthy. Any non-200 or transport
+// error counts as unhealthy — that's exactly the alive-but-wedged
+// signal we want to surface.
+func probeGatewayHealth(client *http.Client, healthURL string) bool {
+	req, err := http.NewRequest(http.MethodGet, healthURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "clawtel/"+version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// gatewayProcessUp reports whether a process matching the pattern is
+// running, via pgrep -f. Distinguishes "gateway down" (process gone)
+// from "gateway wedged" (process up, health failing).
+func gatewayProcessUp(pattern string) bool {
+	return exec.Command("pgrep", "-f", pattern).Run() == nil
 }
 
 // assertSchema verifies:
