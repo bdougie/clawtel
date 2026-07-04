@@ -42,6 +42,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -490,6 +491,32 @@ func sendToURL(client *http.Client, url, ingestKey string, hb heartbeat) error {
 		return fmt.Errorf("ingest returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// probeGatewayHealth GETs the OpenClaw gateway's /health endpoint.
+// The endpoint is designed for external monitors: instant, no session,
+// no LLM call, 200 {"ok":true} when healthy. Any non-200 or transport
+// error counts as unhealthy — that's exactly the alive-but-wedged
+// signal we want to surface.
+func probeGatewayHealth(client *http.Client, healthURL string) bool {
+	req, err := http.NewRequest(http.MethodGet, healthURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "clawtel/"+version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// gatewayProcessUp reports whether a process matching the pattern is
+// running, via pgrep -f. Distinguishes "gateway down" (process gone)
+// from "gateway wedged" (process up, health failing).
+func gatewayProcessUp(pattern string) bool {
+	return exec.Command("pgrep", "-f", pattern).Run() == nil
 }
 
 // assertSchema verifies:

@@ -2358,3 +2358,39 @@ func TestCountErrorNodes_QueryErrorAfterHasColumn(t *testing.T) {
 	// without a mocked sql.DB interface, matching the precedent set by
 	// TestAssertSchema_ScanError for assertSchema's equivalent gap.
 }
+
+// --- gateway probe tests ---
+
+func TestProbeGatewayHealth(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true,"status":"live"}`)
+	}))
+	defer up.Close()
+	if !probeGatewayHealth(up.Client(), up.URL) {
+		t.Error("want healthy on 200")
+	}
+
+	sick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer sick.Close()
+	if probeGatewayHealth(sick.Client(), sick.URL) {
+		t.Error("want unhealthy on 503")
+	}
+
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	dead.Close()
+	if probeGatewayHealth(http.DefaultClient, dead.URL) {
+		t.Error("want unhealthy on connection refused")
+	}
+}
+
+func TestGatewayProcessUp(t *testing.T) {
+	// The test binary itself is a running process pgrep can find.
+	if !gatewayProcessUp("clawtel.test") {
+		t.Error("want true for the running test process")
+	}
+	if gatewayProcessUp("definitely-not-a-real-process-name-xyz") {
+		t.Error("want false for a nonexistent process")
+	}
+}
