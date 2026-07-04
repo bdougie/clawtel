@@ -41,7 +41,7 @@ This is the most important section. clawtel runs on users' machines next to thei
 - **Never read or access** `content`, `bucket`, `project`, or `agent_name` columns from tapes
 - **Never read** any field from `.clawhub/lock.json` other than top-level `version` and `skills.<slug>.version`. Never read `installedAt`, never read `SKILL.md` content from the workdir
 - **Never add** session IDs, file paths, hostnames, IP addresses, or any PII to the heartbeat payload
-- **Never change** the `heartbeat` struct fields without explicit review — this is the network contract. The `context_tokens`, `error_count`, `gateway_process_up`, `gateway_health_ok` fields (clawtel >= 0.2.0) were added under exactly this kind of review — see `docs/superpowers/plans/2026-07-03` in the claw.tech repo — and the field names (`context_tokens`, `error_count`, `gateway_process_up`, `gateway_health_ok`) must match what claw.tech's ingest endpoint accepts (server migration 018)
+- **Never change** the `heartbeat` struct fields without explicit review — this is the network contract. The `context_tokens`, `error_count`, `gateway_process_up`, `gateway_health_ok` fields (clawtel >= 0.2.0) were added under exactly this kind of review — see `docs/superpowers/plans/2026-07-03` in the claw.tech repo — and the field names (`context_tokens`, `error_count`, `gateway_process_up`, `gateway_health_ok`) must match what claw.tech's ingest endpoint accepts (server migration 023 (`023_claw_health.sql`))
 - **Never change** the `resetRequest` struct fields without explicit review — `{claw_id}` is the entire reset payload, by design
 - **`assertSchema`** must fail hard if required columns are missing and warn about sensitive columns
 - **Read-only DB access** — the SQLite connection uses `?mode=ro`
@@ -49,7 +49,7 @@ This is the most important section. clawtel runs on users' machines next to thei
 
 If you're modifying what clawtel reads or sends, update the security model comment at the top of `main.go` to match.
 
-**Deploy order:** clawtel >= 0.2.0 sends `context_tokens`, `error_count`, `gateway_process_up`, `gateway_health_ok` on the heartbeat payload. claw.tech's ingest endpoint must have run migration 018 (which adds these columns to the heartbeats table) **before** any 0.2.0 clawtel release goes out — otherwise the server will reject or silently drop the new fields. Check the claw.tech repo's migration status before tagging a clawtel release that includes this change.
+**Deploy order:** clawtel >= 0.2.0 sends `context_tokens`, `error_count`, `gateway_process_up`, `gateway_health_ok` on the heartbeat payload. claw.tech's ingest endpoint must have run migration 023 (`023_claw_health.sql`) (which adds these columns to the heartbeats table) **before** any 0.2.0 clawtel release goes out — otherwise the server will reject or silently drop the new fields. Check the claw.tech repo's migration status before tagging a clawtel release that includes this change.
 
 ## Testing
 

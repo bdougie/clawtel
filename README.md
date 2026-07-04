@@ -165,7 +165,7 @@ clawtel: reads:  created_at, model, prompt_tokens, completion_tokens, stop_reaso
 clawtel: sends:  tokens + model counts, context/error/gateway health (optional). no prompts. no responses.
 clawtel: NOTE: nodes table has column "content" — clawtel does NOT read it
 clawtel: NOTE: nodes table has column "bucket" — clawtel does NOT read it
-clawtel: polling every 30s
+clawtel: polling every 5m0s
 ```
 
 Stop with `Ctrl+C` or `SIGTERM`.

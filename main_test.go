@@ -2395,6 +2395,19 @@ func TestGatewayProcessUp(t *testing.T) {
 	}
 }
 
+func TestCollectHealthLogsProbeErrors(t *testing.T) {
+	db := openTestDB(t)
+	db.Close() // every query now fails: both probe error branches execute
+
+	ctx, errs, procUp, healthOk := collectHealth(db, http.DefaultClient, probeConfig{}, time.Now().UTC())
+	if ctx != nil || errs != nil {
+		t.Errorf("want nil context/errs on probe failure, got %v %v", ctx, errs)
+	}
+	if procUp != nil || healthOk != nil {
+		t.Errorf("gateway fields must stay nil when probe disabled, got %v %v", procUp, healthOk)
+	}
+}
+
 // --- pollWithURL: health fields wiring ---
 
 func TestPollWithURLAttachesHealthFields(t *testing.T) {
